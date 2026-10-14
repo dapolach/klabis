@@ -6,7 +6,7 @@
 -- Bootstrap data (admin user, OAuth2 clients) managed by BootstrapDataLoader component
 --
 -- Domain tables are organized into module schemas:
---   members, common, events, calendar, groups, finance, membershipfees
+--   members, common, events, calendar, groups, finance, membershipfees, sync
 -- Framework tables (Spring AS, Spring Modulith) remain in public schema.
 --
 -- Tables in dependency order:
@@ -14,13 +14,16 @@
 -- 2. common.users (no dependencies)
 -- 3. common.user_permissions (FK → common.users)
 -- 4. common.password_setup_tokens (FK → common.users)
--- 4a. events.event_types (no dependencies — must precede events)
+-- 4a. events.disciplines (no dependencies — local ORIS-sourced discipline catalog)
+-- 4b. events.event_types (no dependencies — must precede events)
 -- 5. events.events (FK → members.members, events.event_types)
 -- 6. events.event_registrations (FK → events.events, members.members)
 -- 7. calendar.calendar_items (FK → events.events)
 -- 8. members.birth_number_audit_log (no FK)
--- 9. groups.user_groups (unified table: type discriminator FREE/TRAINING/FAMILY)
+-- 9. groups.user_groups (unified table: type discriminator FREE/TRAINING/LEGAL_GUARDIAN)
 -- 10. groups.user_group_owners + user_group_members + user_group_invitations (FK → groups.user_groups)
+-- 37. sync.sync_record (no FK — opaque entity/external references)
+-- 38. sync.sync_attempt (FK → sync.sync_record)
 --
 -- OAuth2 infrastructure tables created in V002 migration
 -- Spring Modulith infrastructure tables created in V003 migration
@@ -36,6 +39,7 @@ CREATE SCHEMA calendar;
 CREATE SCHEMA groups;
 CREATE SCHEMA finance;
 CREATE SCHEMA membershipfees;
+CREATE SCHEMA sync;
 
 -- ============================================================================
 -- 1. MEMBERS TABLE
@@ -64,15 +68,12 @@ CREATE TABLE members.members
     postal_code           VARCHAR(20),  -- Postal or ZIP code
     country               VARCHAR(2),   -- Country code (ISO 3166-1 alpha-2 format, e.g., 'CZ', 'US')
 
-    -- Guardian information (for minors)
-    guardian_first_name   VARCHAR(100),
-    guardian_last_name    VARCHAR(100),
-    guardian_relationship VARCHAR(50),
-    guardian_email        VARCHAR(255),
-    guardian_phone        VARCHAR(50),
-
     -- Status
     is_active             BOOLEAN      NOT NULL DEFAULT TRUE,
+
+    -- Derived completeness (see MemberCompleteness): materialised as of the last save for the member list
+    -- filter; the member detail computes it live (design.md D7 of legal-guardians-via-groups)
+    data_incomplete       BOOLEAN      NOT NULL DEFAULT FALSE,
 
     -- Member self-edit fields (from V009)
     chip_number           VARCHAR(50),
@@ -132,7 +133,7 @@ COMMENT ON COLUMN members.members.referee_license_level IS 'Referee license leve
 COMMENT ON COLUMN members.members.referee_license_validity_date IS 'Referee license validity expiration date (nullable)';
 COMMENT ON COLUMN members.members.driving_license_group IS 'Driving license group/category (nullable, max 10 characters, e.g., BE, C1, C1E)';
 COMMENT ON COLUMN members.members.dietary_restrictions IS 'Dietary restrictions or food allergies (nullable, max 500 characters)';
-COMMENT ON COLUMN members.members.birth_number IS 'Czech birth number (rodné číslo), encrypted with Jasypt, format RRMMDD/XXXX (nullable, only for Czech nationals)';
+COMMENT ON COLUMN members.members.birth_number IS 'Czech birth number (rodné číslo), encrypted with AES-256-GCM, format RRMMDD/XXXX (nullable, only for Czech nationals)';
 COMMENT ON COLUMN members.members.bank_account_number IS 'Bank account number in IBAN or domestic Czech format for expense reimbursement (nullable)';
 
 -- ============================================================================
@@ -238,7 +239,35 @@ COMMENT ON COLUMN common.password_setup_tokens.modified_by IS 'Identifier of who
 COMMENT ON COLUMN common.password_setup_tokens.version IS 'Optimistic locking version for concurrent modification detection';
 
 -- ============================================================================
--- 4a. EVENT_TYPES TABLE
+-- 4a. DISCIPLINES TABLE
+-- Local, ORIS-sourced catalog of orienteering disciplines that event types can
+-- be mapped to. Per ADR-005, carries no orisId column — the ORIS correlation
+-- is tracked exclusively by the synchronisation engine's own sync.sync_record.
+-- ============================================================================
+
+CREATE TABLE events.disciplines
+(
+    id          UUID         NOT NULL PRIMARY KEY,
+    code        VARCHAR(50)  NOT NULL,
+    name        VARCHAR(200) NOT NULL,
+    archived    BOOLEAN      NOT NULL DEFAULT FALSE,
+
+    -- Audit fields
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by  VARCHAR(100) NOT NULL,
+    modified_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modified_by VARCHAR(100) NOT NULL,
+    version     BIGINT       NOT NULL DEFAULT 0
+);
+
+-- Comments for disciplines
+COMMENT ON TABLE events.disciplines IS 'Local, ORIS-sourced catalog of orienteering disciplines that event types can be mapped to';
+COMMENT ON COLUMN events.disciplines.code IS 'Short discipline code (e.g. OB)';
+COMMENT ON COLUMN events.disciplines.name IS 'Display name of the discipline (e.g. Orientační běh)';
+COMMENT ON COLUMN events.disciplines.archived IS 'Soft-delete flag — archived disciplines are hidden from new assignments but existing EventType references keep working';
+
+-- ============================================================================
+-- 4b. EVENT_TYPES TABLE
 -- Catalog of event types (e.g. Training, Race, Championship) managed by admin
 -- Must be created before events table due to FK dependency
 -- ============================================================================
@@ -274,17 +303,18 @@ COMMENT ON COLUMN events.event_types.color IS 'Optional hex color code for displ
 COMMENT ON COLUMN events.event_types.sort_order IS 'Position in sorted lists and filters; newly created types get MAX+1';
 
 -- ============================================================================
--- 4b. EVENT_TYPE_ORIS_DISCIPLINES TABLE
--- Maps ORIS discipline IDs to event types (each discipline ID belongs to at most one event type)
+-- 4c. EVENT_TYPE_DISCIPLINES TABLE
+-- Maps local disciplines (events.disciplines) to event types (each discipline belongs to
+-- at most one event type).
 -- ============================================================================
 
-CREATE TABLE events.event_type_oris_disciplines
+CREATE TABLE events.event_type_disciplines
 (
     event_type_id UUID NOT NULL REFERENCES events.event_types (id) ON DELETE CASCADE,
-    discipline_id INT  NOT NULL
+    discipline_id UUID NOT NULL REFERENCES events.disciplines (id)
 );
 
-CREATE UNIQUE INDEX idx_event_type_oris_disciplines_discipline ON events.event_type_oris_disciplines (discipline_id);
+CREATE UNIQUE INDEX idx_event_type_disciplines_discipline ON events.event_type_disciplines (discipline_id);
 
 -- ============================================================================
 -- 5. EVENTS TABLE
@@ -306,9 +336,6 @@ CREATE TABLE events.events
     registration_deadline_2 DATE        NULL,
     registration_deadline_3 DATE        NULL,
 
-    -- ORIS integration: source identifier for imported events (null for manually created events)
-    oris_id              INTEGER      NULL UNIQUE,
-
     -- Optional free-text reason provided when the event is cancelled (null when not cancelled or no reason given)
     cancellation_reason  VARCHAR(500)  NULL,
 
@@ -323,6 +350,14 @@ CREATE TABLE events.events
     -- Base entry fee (null for events without a defined entry fee)
     base_entry_fee_amount   DECIMAL(10, 2) NULL,
     base_entry_fee_currency CHAR(3)        NULL,
+
+    -- Opt-in shared-service offers (off by default; editable while the event is DRAFT or ACTIVE)
+    shared_transport_enabled     BOOLEAN NOT NULL DEFAULT FALSE,
+    shared_accommodation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- SI card policy: how the event uses SI cards and whether the organiser rents them out
+    si_usage                     VARCHAR(20) NOT NULL DEFAULT 'REQUIRED',
+    si_rental_allowed            BOOLEAN NOT NULL DEFAULT TRUE,
 
     -- Audit fields
     created_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -349,6 +384,10 @@ COMMENT ON COLUMN events.events.registration_deadline IS 'First (earliest) regis
 COMMENT ON COLUMN events.events.registration_deadline_2 IS 'Second registration deadline; requires registration_deadline to be set';
 COMMENT ON COLUMN events.events.registration_deadline_3 IS 'Third (latest) registration deadline; requires registration_deadline_2 to be set';
 COMMENT ON COLUMN events.events.status IS 'Event status (e.g., DRAFT, PUBLISHED, CANCELLED, COMPLETED)';
+COMMENT ON COLUMN events.events.shared_transport_enabled IS 'Whether the event offers shared transport for members to opt into; off by default';
+COMMENT ON COLUMN events.events.shared_accommodation_enabled IS 'Whether the event offers shared accommodation for members to opt into; off by default';
+COMMENT ON COLUMN events.events.si_usage IS 'How the event uses SI cards: NOT_USED, OPTIONAL or REQUIRED';
+COMMENT ON COLUMN events.events.si_rental_allowed IS 'Whether participants may rent an SI card from the organiser; always false when si_usage is NOT_USED';
 COMMENT ON COLUMN events.events.created_at IS 'Timestamp when event was created';
 COMMENT ON COLUMN events.events.created_by IS 'User who created the event';
 COMMENT ON COLUMN events.events.modified_at IS 'Timestamp when event was last modified';
@@ -365,9 +404,20 @@ CREATE TABLE events.event_registrations
     id             UUID PRIMARY KEY,
     event_id       UUID       NOT NULL REFERENCES events.events (id) ON DELETE CASCADE,
     member_id      UUID       NOT NULL REFERENCES members.members (id) ON DELETE CASCADE,
-    si_card_number VARCHAR(8) NOT NULL,
+    si_card_number VARCHAR(8) NULL,
     category_id    UUID NULL,
     registered_at  TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    -- Member's opt-in choices for the event's shared-service offers (off by default; only meaningful
+    -- while the matching offer is enabled on the event, retained but ignored when it is turned off)
+    wants_shared_transport     BOOLEAN NOT NULL DEFAULT FALSE,
+    wants_shared_accommodation BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Member asked to borrow an SI card from the organiser; may stand in for a missing si_card_number
+    wants_to_rent_si BOOLEAN NOT NULL DEFAULT FALSE,
+
+    internal_note  VARCHAR(255) NULL,
+    oris_note      VARCHAR(255) NULL,
 
     -- Unique constraint: one registration per member per event
     CONSTRAINT uk_event_registrations_event_member UNIQUE (event_id, member_id)
@@ -381,9 +431,14 @@ COMMENT ON TABLE events.event_registrations IS 'Stores member registrations for 
 COMMENT ON COLUMN events.event_registrations.id IS 'Unique registration identifier (UUID)';
 COMMENT ON COLUMN events.event_registrations.event_id IS 'Reference to the event';
 COMMENT ON COLUMN events.event_registrations.member_id IS 'Reference to the registered member';
-COMMENT ON COLUMN events.event_registrations.si_card_number IS 'SI (SportIdent) card number used for the event';
+COMMENT ON COLUMN events.event_registrations.si_card_number IS 'SI (SportIdent) card number used for the event (nullable: SI may be unused or optional for the event, or the member rents a card)';
 COMMENT ON COLUMN events.event_registrations.category_id IS 'Reference to events.event_categories.id (nullable: null when event has no categories, or orphaned when the category was later removed from the event — no FK constraint so the row is preserved either way)';
 COMMENT ON COLUMN events.event_registrations.registered_at IS 'Timestamp when member registered for the event';
+COMMENT ON COLUMN events.event_registrations.wants_shared_transport IS 'Member asked to use the event''s shared transport offer; retained but not shown when the offer is off';
+COMMENT ON COLUMN events.event_registrations.wants_shared_accommodation IS 'Member asked to use the event''s shared accommodation offer; retained but not shown when the offer is off';
+COMMENT ON COLUMN events.event_registrations.wants_to_rent_si IS 'Member asked to rent an SI card for the event; retained but not shown when the event does not allow rental';
+COMMENT ON COLUMN events.event_registrations.internal_note IS 'Free-text remark for the club only (nullable)';
+COMMENT ON COLUMN events.event_registrations.oris_note IS 'Free-text remark for the organiser''s ORIS entry (nullable)';
 
 -- ============================================================================
 -- 6b. EVENT_COORDINATORS TABLE
@@ -520,10 +575,41 @@ COMMENT ON COLUMN members.birth_number_audit_log.action IS 'Action type: VIEW_BI
 COMMENT ON COLUMN members.birth_number_audit_log.occurred_at IS 'Timestamp when the action occurred';
 
 -- ============================================================================
+-- 9a. LEGAL_GUARDIANS TABLE
+-- Legal guardians who are not club members (a user is either a Member or a LegalGuardian, never both)
+-- id is the common.users id (no FK, like members.members), so a promoted guardian keeps the same UserId as the new Member
+-- ============================================================================
+
+CREATE TABLE members.legal_guardians
+(
+    id          UUID PRIMARY KEY,
+    first_name  VARCHAR(100) NOT NULL,
+    last_name   VARCHAR(100) NOT NULL,
+    email       VARCHAR(255) NOT NULL UNIQUE,
+    phone       VARCHAR(50)  NOT NULL,
+
+    -- Audit fields
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by  VARCHAR(100) NOT NULL,
+    modified_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modified_by VARCHAR(100) NOT NULL,
+    version     BIGINT       NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_legal_guardians_last_name ON members.legal_guardians (last_name);
+
+COMMENT ON TABLE members.legal_guardians IS 'Legal guardians who are not club members; e-mail and phone are always present';
+COMMENT ON COLUMN members.legal_guardians.id IS 'Same UUID as common.users.id (login name is a generated EXTnnnn number)';
+
+-- Series for the EXTnnnn login numbers of non-member legal guardians; numbers are never reused
+CREATE SEQUENCE members.legal_guardian_login_number_seq START WITH 1 INCREMENT BY 1;
+
+-- ============================================================================
 -- 14. USER_GROUPS TABLE
--- Unified table for all group types (FREE = FreeGroup, TRAINING = TrainingGroup, FAMILY = FamilyGroup)
+-- Unified table for all group types (FREE = FreeGroup, TRAINING = TrainingGroup, LEGAL_GUARDIAN = LegalGuardianGroup)
 -- The type column acts as a discriminator to separate groups by their aggregate type.
--- age_range_min/max are used only by TRAINING groups; NULL for FREE and FAMILY groups.
+-- age_range_min/max are used only by TRAINING groups; NULL for FREE and LEGAL_GUARDIAN groups.
+-- delegated_authorities is used only by FREE groups (fixed at creation); NULL = delegates nothing.
 -- ============================================================================
 
 CREATE TABLE groups.user_groups
@@ -533,6 +619,7 @@ CREATE TABLE groups.user_groups
     name          VARCHAR(200) NOT NULL,
     age_range_min INT          NULL,
     age_range_max INT          NULL,
+    delegated_authorities VARCHAR(500) NULL,
 
     -- Audit fields
     created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -541,7 +628,7 @@ CREATE TABLE groups.user_groups
     modified_by   VARCHAR(100) NOT NULL,
     version       BIGINT       NOT NULL DEFAULT 0,
 
-    CONSTRAINT chk_user_groups_type CHECK (type IN ('FREE', 'TRAINING', 'FAMILY'))
+    CONSTRAINT chk_user_groups_type CHECK (type IN ('FREE', 'TRAINING', 'LEGAL_GUARDIAN'))
 );
 
 -- Indexes for user_groups
@@ -550,29 +637,30 @@ CREATE INDEX idx_user_groups_name ON groups.user_groups (name);
 CREATE INDEX idx_user_groups_training_age ON groups.user_groups (type, age_range_min, age_range_max);
 
 -- Comments for user_groups
-COMMENT ON TABLE groups.user_groups IS 'Unified table for all group aggregate types: FREE (FreeGroup), TRAINING (TrainingGroup), FAMILY (FamilyGroup)';
-COMMENT ON COLUMN groups.user_groups.type IS 'Discriminator: FREE = invitation-based members group, TRAINING = age-range training group, FAMILY = family group';
+COMMENT ON TABLE groups.user_groups IS 'Unified table for all group aggregate types: FREE (FreeGroup), TRAINING (TrainingGroup), LEGAL_GUARDIAN (LegalGuardianGroup)';
+COMMENT ON COLUMN groups.user_groups.type IS 'Discriminator: FREE = invitation-based members group, TRAINING = age-range training group, LEGAL_GUARDIAN = legal guardian group';
 COMMENT ON COLUMN groups.user_groups.age_range_min IS 'Minimum age (inclusive) — populated only for TRAINING groups';
 COMMENT ON COLUMN groups.user_groups.age_range_max IS 'Maximum age (inclusive) — populated only for TRAINING groups';
+COMMENT ON COLUMN groups.user_groups.delegated_authorities IS 'Comma-separated authority values the owners of a FREE group hold over its members — populated only for FREE groups, fixed at creation';
 
 -- ============================================================================
 -- 15. USER_GROUP_OWNERS TABLE
--- Maps owners/trainers/parents to their group (role depends on the group type).
+-- Maps owners/trainers/legal guardians to their group (role depends on the group type).
 -- ============================================================================
 
 CREATE TABLE groups.user_group_owners
 (
     user_group_id UUID NOT NULL REFERENCES groups.user_groups (id) ON DELETE CASCADE,
-    member_id     UUID NOT NULL,
-    PRIMARY KEY (user_group_id, member_id)
+    owner_id      UUID NOT NULL,
+    PRIMARY KEY (user_group_id, owner_id)
 );
 
 -- Indexes for user_group_owners
 CREATE INDEX idx_user_group_owners_group_id ON groups.user_group_owners (user_group_id);
-CREATE INDEX idx_user_group_owners_member_id ON groups.user_group_owners (member_id);
+CREATE INDEX idx_user_group_owners_owner_id ON groups.user_group_owners (owner_id);
 
 -- Comments for user_group_owners
-COMMENT ON TABLE groups.user_group_owners IS 'Owners/trainers/parents per group — interpretation depends on the group type';
+COMMENT ON TABLE groups.user_group_owners IS 'Owners/trainers/legal guardians per group — interpretation depends on the group type';
 
 -- ============================================================================
 -- 16. USER_GROUP_MEMBERS TABLE
@@ -964,6 +1052,128 @@ CREATE TABLE events.member_registration_block
 COMMENT ON TABLE events.member_registration_block IS 'Active event-registration blocks for members who missed the fee selection deadline. Owned by the events module.';
 COMMENT ON COLUMN events.member_registration_block.member_id IS 'Reference to Member aggregate (no FK — cross-module value object reference)';
 COMMENT ON COLUMN events.member_registration_block.blocked_at IS 'Timestamp when the block was applied';
+
+-- ============================================================================
+-- 37. SYNC_RECORD TABLE
+-- The synchronisation state of one Klabis entity against one external system
+-- (openspec/changes/add-bidirectional-sync-engine/design.md D13, D19).
+-- Projection columns are TEXT and encrypted (EncryptedString); hash columns are
+-- plaintext — hashes cover the whole projection only, never a single field.
+-- baseline_external_* are populated only while an accepted divergence stands, so the
+-- common case (identical baseline halves) costs no extra encrypted payload.
+-- ============================================================================
+
+CREATE TABLE sync.sync_record
+(
+    id                        UUID         NOT NULL PRIMARY KEY,
+    entity_type               VARCHAR(50)  NOT NULL,
+    entity_id                 VARCHAR(100) NOT NULL,
+    external_system           VARCHAR(50)  NOT NULL,
+    external_id               VARCHAR(200) NOT NULL,
+    status                    VARCHAR(20)  NOT NULL,
+
+    baseline_local_projection TEXT         NULL,
+    baseline_local_hash       VARCHAR(64)  NULL,
+    baseline_external_projection TEXT      NULL,
+    baseline_external_hash    VARCHAR(64)  NULL,
+
+    local_projection          TEXT         NULL,
+    local_hash                VARCHAR(64)  NULL,
+    external_projection       TEXT         NULL,
+    external_hash             VARCHAR(64)  NULL,
+
+    external_version_token    VARCHAR(200) NULL,
+
+    claimed_at                TIMESTAMP    NULL,
+
+    acknowledged_local_hash   VARCHAR(64)  NULL,
+    acknowledged_external_hash VARCHAR(64) NULL,
+    acknowledged_at           TIMESTAMP    NULL,
+    acknowledged_by           VARCHAR(100) NULL,
+
+    last_successful_sync_at   TIMESTAMP    NULL,
+    last_direction            VARCHAR(20)  NULL,
+    retired_at                TIMESTAMP    NULL,
+
+    -- Audit fields
+    created_at                TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by                VARCHAR(100) NOT NULL,
+    modified_at                TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modified_by                VARCHAR(100) NOT NULL,
+    version                    BIGINT      NOT NULL DEFAULT 0,
+
+    CONSTRAINT uq_sync_record_target UNIQUE (entity_type, entity_id, external_system),
+    CONSTRAINT uq_sync_record_external UNIQUE (external_system, external_id, entity_type)
+);
+
+-- Comments for sync_record
+COMMENT ON TABLE sync.sync_record IS 'Synchronisation state of one Klabis entity against one external system';
+COMMENT ON COLUMN sync.sync_record.entity_id IS 'Opaque entity identifier — the engine depends on no module''s identifier type';
+COMMENT ON COLUMN sync.sync_record.baseline_local_projection IS 'Encrypted at rest via EncryptedString converters (design.md D13)';
+COMMENT ON COLUMN sync.sync_record.baseline_external_projection IS 'Populated only while an accepted divergence stands (D6); null otherwise';
+COMMENT ON COLUMN sync.sync_record.local_hash IS 'Plaintext digest of the whole local projection — never a per-field digest (D13)';
+
+-- Backs the nightly full pass (design.md D10, D17): every non-retired record.
+CREATE INDEX idx_sync_record_status ON sync.sync_record (status);
+
+-- ============================================================================
+-- 38. SYNC_ATTEMPT TABLE
+-- Append-only audit trail (design.md D15). Holds hashes only, never projections, so
+-- payload data lives in exactly one table.
+-- ============================================================================
+
+CREATE TABLE sync.sync_attempt
+(
+    id              UUID         NOT NULL PRIMARY KEY,
+    sync_record_id  UUID         NOT NULL,
+    started_at      TIMESTAMP    NOT NULL,
+    trigger         VARCHAR(20)  NOT NULL,
+    direction       VARCHAR(20)  NULL,
+    outcome         VARCHAR(20)  NOT NULL,
+    local_hash      VARCHAR(64)  NULL,
+    external_hash   VARCHAR(64)  NULL,
+    failure_reason  VARCHAR(2000) NULL,
+    acting_user     VARCHAR(100) NULL,
+
+    CONSTRAINT fk_sync_attempt_record FOREIGN KEY (sync_record_id) REFERENCES sync.sync_record (id)
+);
+
+-- Index backing "attempts since last success/reset" and retention pruning
+CREATE INDEX idx_sync_attempt_record_started_at ON sync.sync_attempt (sync_record_id, started_at DESC);
+
+-- Comments for sync_attempt
+COMMENT ON TABLE sync.sync_attempt IS 'Append-only history of synchronisation attempts (design.md D15)';
+COMMENT ON COLUMN sync.sync_attempt.acting_user IS 'Opaque acting-user identifier for manually triggered attempts only (D15)';
+
+-- ============================================================================
+-- 39. SYNC_SCHEDULE TABLE
+-- Scheduling state for one sync_record, split out from it (proposal.md
+-- sync-followup-outcome-writer-transactions, task 2.3): dirty_since and
+-- next_attempt_due_at are a scheduling hint only, never domain state, and must never
+-- contend for the aggregate's optimistic lock. Deliberately no version column — a
+-- concurrent markDirty write and an outcome-writer save must both be able to succeed
+-- without racing each other.
+--
+-- Every sync_record gets its sync_schedule row at enrolment, so no read path has to
+-- handle a missing one (see SyncScheduleRepositoryAdapter for the coded default used
+-- when one is nonetheless absent).
+-- ============================================================================
+
+CREATE TABLE sync.sync_schedule
+(
+    sync_record_id      UUID      NOT NULL PRIMARY KEY,
+    dirty_since          TIMESTAMP NULL,
+    next_attempt_due_at  TIMESTAMP NULL,
+
+    CONSTRAINT fk_sync_schedule_record FOREIGN KEY (sync_record_id) REFERENCES sync.sync_record (id)
+);
+
+COMMENT ON TABLE sync.sync_schedule IS 'Scheduling hint for one sync_record — never domain state, never versioned (design.md D9)';
+
+-- Backs the due scan (design.md D10): one indexed lookup for dirty/retry-due records.
+-- The only such index left (proposal.md task 4b.3 drops sync_record's own
+-- idx_sync_record_due_scan/columns once findDueForScan's query moves onto this table).
+CREATE INDEX idx_sync_schedule_due_scan ON sync.sync_schedule (dirty_since, next_attempt_due_at);
 
 -- ============================================================================
 -- BOOTSTRAP DATA NOTE

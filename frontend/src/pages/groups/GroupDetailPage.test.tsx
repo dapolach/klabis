@@ -50,6 +50,10 @@ vi.mock('../../contexts/HalRouteContext.tsx', () => ({
     HalRouteProvider: ({children}: {children: React.ReactNode}) => <>{children}</>,
 }));
 
+vi.mock('../../contexts/authContext.ts', () => ({
+    useAuth: () => ({getUser: () => ({memberId: null})}),
+}));
+
 vi.mock('../../contexts/halRouteContext.ts', () => ({
     useHalRoute: vi.fn(() => ({
         resourceData: {firstName: 'Jana', lastName: 'Nováková', registrationNumber: 'ZBM9500', _links: {self: {href: '/api/members/member-1'}}},
@@ -208,6 +212,33 @@ describe('GroupDetailPage', () => {
         renderPage(createMockPageData(resourceData));
         fireEvent.click(screen.getByRole('button', {name: /upravit název/i}));
         expect(screen.getByTestId('hal-form-display')).toBeInTheDocument();
+    });
+
+    describe('delegated permissions', () => {
+        it('shows the permissions owners hold over members', () => {
+            renderPage(createMockPageData(buildGroupDetail({delegatedAuthorities: ['MEMBERS:EDIT_PROFILE']})));
+            expect(screen.getByText('Vlastníci skupiny (i budoucí) mohou: Úprava údajů člena')).toBeInTheDocument();
+        });
+
+        it('states that owners gain nothing when no permission is delegated', () => {
+            renderPage(createMockPageData(buildGroupDetail({delegatedAuthorities: []})));
+            expect(screen.getByText('Vlastníci skupiny nad členy nezískávají žádná oprávnění.')).toBeInTheDocument();
+        });
+
+        it('shows the delegated permissions read-only inside the edit form', () => {
+            const resourceData = buildGroupDetail({
+                delegatedAuthorities: ['MEMBERS:EDIT_PROFILE'],
+                _templates: {updateGroup: mockHalFormsTemplate({title: 'Upravit název', method: 'PATCH'})},
+            });
+            renderPage(createMockPageData(resourceData));
+            expect(screen.queryByTestId('delegated-authorities-readonly')).not.toBeInTheDocument();
+
+            fireEvent.click(screen.getByRole('button', {name: /upravit název/i}));
+
+            const readOnly = screen.getByTestId('delegated-authorities-readonly');
+            expect(readOnly).toHaveTextContent('Úprava údajů člena');
+            expect(readOnly.querySelector('input')).toBeNull();
+        });
     });
 
     it('shows "Přidat člena" button when addGroupMember template exists', () => {

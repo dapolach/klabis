@@ -8,18 +8,25 @@ import {HalEmbeddedTable} from "../../components/HalNavigator2/HalEmbeddedTable.
 import {useHalPageData} from "../../hooks/useHalPageData.ts";
 import {PermissionsDialog} from "../../components/members/PermissionsDialog.tsx";
 import {HalFormDisplay} from "../../components/HalNavigator2/HalFormDisplay.tsx";
-import {Button, DetailRow, Modal} from "../../components/UI";
+import {Badge, Button, DetailRow, Modal} from "../../components/UI";
 import {HalFormButton} from "../../components/HalNavigator2/HalFormButton.tsx";
+import {SyncMembersFromOrisModal} from "../../components/members/SyncMembersFromOrisModal.tsx";
 import {Section} from "./MemberSection.tsx";
+import {RegistrationContactSection, RegistrationGuardianSections} from "./RegistrationGuardianSections.tsx";
 import {BirthNumberConditionalField} from "./BirthNumberConditionalField.tsx";
 import type {HalFormPanelRenderHelpers} from "../../components/HalNavigator2/HalFormPanel.tsx";
-import {Banknote, Pencil, Shield, UserCheck, UserX} from "lucide-react";
+import {Banknote, Pencil, RefreshCw, Shield, UserCheck, UserX} from "lucide-react";
 import type {TableCellRenderProps} from "../../components/KlabisTable/types.ts";
 import {labels} from "../../localization";
+import {SyncStatusIndicator} from "../../components/sync/SyncStatusIndicator.tsx";
 import {SuspensionWarningDialog} from "./SuspensionWarningDialog.tsx";
 import {NegativeBalanceSuspensionDialog} from "./NegativeBalanceSuspensionDialog.tsx";
 import {useSuspendMemberAction} from "./useSuspendMemberAction.ts";
-import {DEFAULT_MEMBER_STATUS, MembersFilterBar, type MembersFilterValue} from "../../components/members/MembersFilterBar.tsx";
+import {
+    DEFAULT_MEMBER_STATUS,
+    MembersFilterBar,
+    type MembersFilterValue
+} from "../../components/members/MembersFilterBar.tsx";
 import {useDefaultSearchParam} from "../../hooks/useDefaultSearchParam.ts";
 import {usePermissionsEditor} from "../../hooks/usePermissionsEditor.ts";
 
@@ -44,6 +51,11 @@ export const MembersPage = (): ReactElement => {
     const [actionModal, setActionModal] = useState<MemberActionModalState | null>(null);
     const [permissionsDialog, setPermissionsDialog] = useState<MemberPermissionsDialogState | null>(null);
     const [transactionDialogAccount, setTransactionDialogAccount] = useState<Link | null>(null);
+    const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+
+    const importFromOrisTemplate = resourceData?._templates?.importFromOris;
+    const importFromOrisTarget = importFromOrisTemplate?.target;
+    const hasImportFromOris = !!importFromOrisTemplate;
 
     const {
         suspensionWarning,
@@ -57,19 +69,22 @@ export const MembersPage = (): ReactElement => {
 
     const urlStatus = searchParams.get('status');
     const urlQ = searchParams.get('q') ?? '';
+    const urlIncomplete = searchParams.get('incomplete') === 'true';
 
     useDefaultSearchParam('status', DEFAULT_MEMBER_STATUS);
 
     const filterValue: MembersFilterValue = useMemo(() => ({
         q: urlQ,
         status: (urlStatus ?? DEFAULT_MEMBER_STATUS) as MembersFilterValue['status'],
-    }), [urlQ, urlStatus]);
+        incomplete: urlIncomplete,
+    }), [urlQ, urlStatus, urlIncomplete]);
 
     const handleFilterChange = useCallback((next: MembersFilterValue) => {
         setSearchParams((prev) => {
             const params = new URLSearchParams(prev);
             params.set('status', next.status);
             if (next.q) { params.set('q', next.q); } else { params.delete('q'); }
+            if (next.incomplete) { params.set('incomplete', 'true'); } else { params.delete('incomplete'); }
             return params;
         });
     }, [setSearchParams]);
@@ -78,8 +93,9 @@ export const MembersPage = (): ReactElement => {
         const params: Record<string, string> = {};
         if (urlStatus) params.status = urlStatus;
         if (urlQ && urlQ.length >= 2) params.q = urlQ;
+        if (urlIncomplete) params.incomplete = 'true';
         return params;
-    }, [urlStatus, urlQ]);
+    }, [urlStatus, urlQ, urlIncomplete]);
 
     const openActionModal = (member: MemberSummaryData, templateName: string) => {
         const template = member._templates?.[templateName];
@@ -178,12 +194,19 @@ export const MembersPage = (): ReactElement => {
                         <UserCheck className="w-4 h-4"/>
                     </Button>
                 )}
+                <SyncStatusIndicator syncLink={member._links?.sync} mode="icon"/>
             </div>
         );
     };
 
     const renderEmailCell = ({item}: TableCellRenderProps) => {
         return (item.email as string | null) ?? null;
+    };
+
+    const renderDataIncompleteCell = ({item}: TableCellRenderProps) => {
+        const member = item as unknown as MemberSummaryData;
+        if (!member.dataIncomplete) return null;
+        return <Badge variant="orange" size="sm">{labels.membersFilter.incompleteBadge}</Badge>;
     };
 
     const memberName = permissionsDialog
@@ -207,6 +230,16 @@ export const MembersPage = (): ReactElement => {
                 <div className="flex items-center justify-between">
                     <h2 className="text-xl font-bold text-text-primary">{labels.sections.membersList}</h2>
                     <div className="flex gap-2">
+                        {hasImportFromOris && (
+                            <Button
+                                variant="ghost"
+                                startIcon={<RefreshCw className="w-4 h-4"/>}
+                                data-testid="form-template-button-importFromOris"
+                                onClick={() => setIsSyncModalOpen(true)}
+                            >
+                                {labels.templates.importFromOris}
+                            </Button>
+                        )}
                         <HalFormButton name="registerMember" modal={false}>
                             {({renderInput, renderField, hasField, hasType}: HalFormPanelRenderHelpers) => {
                                 const PERSONAL_FIELDS = ['firstName', 'lastName', 'dateOfBirth', 'gender', 'nationality', 'birthNumber'];
@@ -218,7 +251,6 @@ export const MembersPage = (): ReactElement => {
                                 const TRAINER_LICENSE_TYPE = 'TrainerLicenseDto';
                                 const DOCUMENT_FIELDS = ['drivingLicenseGroup'];
                                 const DOCUMENT_TYPES = [IDENTITY_CARD_TYPE, MEDICAL_COURSE_TYPE, TRAINER_LICENSE_TYPE];
-                                const GUARDIAN_TYPE = 'GuardianDTO';
                                 const hasFields = (fieldNames: string[]) => fieldNames.some(f => hasField(f));
                                 const hasDocumentFields = hasFields(DOCUMENT_FIELDS) || DOCUMENT_TYPES.some(t => hasType(t));
                                 return (
@@ -236,11 +268,9 @@ export const MembersPage = (): ReactElement => {
                                                     </Section>
                                                 )}
                                                 {hasFields(CONTACT_FIELDS) && (
-                                                    <Section title={labels.sections.contact}>
-                                                        {hasField('email') && <DetailRow label={labels.fields.email}>{renderInput('email')}</DetailRow>}
-                                                        {hasField('phone') && <DetailRow label={labels.fields.phone}>{renderInput('phone')}</DetailRow>}
-                                                    </Section>
+                                                    <RegistrationContactSection renderInput={renderInput} hasField={hasField}/>
                                                 )}
+                                                <RegistrationGuardianSections renderInput={renderInput} hasField={hasField}/>
                                                 {hasType(ADDRESS_TYPE) && (
                                                     <Section title={labels.sections.address}>
                                                         {renderInput('address')}
@@ -257,11 +287,6 @@ export const MembersPage = (): ReactElement => {
                                                             </DetailRow>
                                                         )}
                                                         {hasField('dietaryRestrictions') && <DetailRow label={labels.fields.dietaryRestrictions}>{renderInput('dietaryRestrictions')}</DetailRow>}
-                                                    </Section>
-                                                )}
-                                                {hasType(GUARDIAN_TYPE) && (
-                                                    <Section title={labels.sections.guardian}>
-                                                        {renderInput('guardian')}
                                                     </Section>
                                                 )}
                                             </div>
@@ -300,6 +325,9 @@ export const MembersPage = (): ReactElement => {
                     <TableCell sortable column={"lastName"}>{labels.fields.lastName}</TableCell>
                     <TableCell sortable column={"firstName"}>{labels.fields.firstName}</TableCell>
                     <TableCell column={"email"} dataRender={renderEmailCell}>{labels.fields.email}</TableCell>
+                    {hasManageAuthority && (
+                        <TableCell column={"dataIncomplete"} dataRender={renderDataIncompleteCell}>{labels.membersFilter.incompleteBadge}</TableCell>
+                    )}
                     <TableCell column={"_actions"} dataRender={renderActionsCell}>{labels.tables.actions}</TableCell>
                 </HalEmbeddedTable>
             </div>
@@ -343,6 +371,12 @@ export const MembersPage = (): ReactElement => {
                 accountLink={transactionDialogAccount ?? {href: ''}}
                 isOpen={transactionDialogAccount !== null}
                 onClose={() => setTransactionDialogAccount(null)}
+            />
+            <SyncMembersFromOrisModal
+                isOpen={isSyncModalOpen}
+                onClose={() => setIsSyncModalOpen(false)}
+                targetUrl={importFromOrisTarget}
+                onSyncComplete={() => route.refetch()}
             />
         </div>
     );

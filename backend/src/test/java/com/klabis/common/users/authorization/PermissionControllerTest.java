@@ -1,25 +1,20 @@
 package com.klabis.common.users.authorization;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
+import com.klabis.common.CommonWebMvcTest;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.UserId;
 import com.klabis.common.users.application.PermissionService;
 import com.klabis.common.users.domain.AuthorizationPolicy;
 import com.klabis.common.users.domain.UserNotFoundException;
 import com.klabis.common.users.domain.UserPermissions;
-import com.klabis.common.users.infrastructure.restapi.PermissionController;
 import com.klabis.common.users.infrastructure.restapi.UpdatePermissionsRequest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.hateoas.MediaTypes;
 import org.springframework.http.MediaType;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.ObjectMapper;
 
@@ -38,10 +33,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-@WebMvcTest(PermissionController.class)
-@Import({EncryptionConfiguration.class})
+@CommonWebMvcTest
 @DisplayName("PermissionController permissions endpoints tests")
-@WithPostprocessors
 class PermissionControllerTest {
 
     @Autowired
@@ -50,7 +43,7 @@ class PermissionControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
-    @MockitoBean
+    @Autowired
     private PermissionService permissionService;
 
     private static final UserId USER_ID = new UserId(UUID.randomUUID());
@@ -111,6 +104,26 @@ class PermissionControllerTest {
                     .andExpect(jsonPath("$._templates.updatePermissions.properties[0].readOnly").doesNotExist())
                     .andExpect(jsonPath("$._templates.updatePermissions.properties[0].type").value("Authority"))
                     .andExpect(jsonPath("$._templates.updatePermissions.properties[0].multi").value(true));
+        }
+
+        @Test
+        @DisplayName("should offer manageable authorities as inline options in the updatePermissions template")
+        @WithKlabisMockUser(authorities = {Authority.MEMBERS_PERMISSIONS})
+        void shouldExposeManageableAuthoritiesAsInlineOptions() throws Exception {
+            // Given
+            when(permissionService.getUserPermissions(any(UserId.class)))
+                    .thenReturn(UserPermissions.create(USER_ID, Set.of(Authority.MEMBERS_MANAGE)));
+
+            // When & Then — values only (the frontend localises labels); the catalogue is every
+            // assignable authority (not the target user's current set) minus the standard reads
+            // and the internal-only DEVELOPER.
+            mockMvc.perform(get("/api/users/{id}/permissions", USER_ID.uuid()).accept(MediaTypes.HAL_FORMS_JSON))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$._templates.updatePermissions.properties[?(@.name=='authorities')].options.inline[?(@=='MEMBERS:MANAGE')]").exists())
+                    .andExpect(jsonPath("$._templates.updatePermissions.properties[?(@.name=='authorities')].options.inline[?(@=='EVENTS:MANAGE')]").exists())
+                    .andExpect(jsonPath("$._templates.updatePermissions.properties[?(@.name=='authorities')].options.inline[?(@=='DEVELOPER')]").isEmpty())
+                    .andExpect(jsonPath("$._templates.updatePermissions.properties[?(@.name=='authorities')].options.inline[?(@=='MEMBERS:READ')]").isEmpty())
+                    .andExpect(jsonPath("$._templates.updatePermissions.properties[?(@.name=='authorities')].options.inline[?(@=='EVENTS:READ')]").isEmpty());
         }
 
         @Test

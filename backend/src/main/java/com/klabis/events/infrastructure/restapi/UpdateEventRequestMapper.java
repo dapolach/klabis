@@ -6,6 +6,8 @@ import com.klabis.events.EventCategoryId;
 import com.klabis.events.domain.Event;
 import com.klabis.events.domain.EventRanking;
 import com.klabis.events.domain.EventUpdateEventBuilder;
+import com.klabis.events.domain.SiPolicy;
+import com.klabis.events.domain.SiUsage;
 import org.openapitools.jackson.nullable.JsonNullable;
 
 import java.util.List;
@@ -40,11 +42,30 @@ class UpdateEventRequestMapper {
         overlay(request.ranking(), v -> b.ranking(toRanking(v)));
         overlay(request.baseEntryFee(), v -> b.baseEntryFee(EventRequestConversions.toMoney(v)));
 
+        overlay(request.sharedTransportEnabled(), b::sharedTransportEnabled);
+        overlay(request.sharedAccommodationEnabled(), b::sharedAccommodationEnabled);
+
+        overlaySiPolicy(request, prefilled.siPolicy(), b);
+
         overlay(request.coordinators(), v -> b.coordinators(EventRequestConversions.toCoordinators(v)));
         overlay(request.deadlines(), v -> b.registrationDeadlines(EventRequestConversions.toRegistrationDeadlines(v)));
         overlay(request.categories(), v -> b.categories(mergeCategories(v, prefilled.categories())));
 
         return b.build();
+    }
+
+    /**
+     * Usage and rental are independent in the request but form one value object in the domain, so
+     * each is resolved against the baseline before the policy is rebuilt. A present-null usage
+     * keeps the current one, like {@code name}.
+     */
+    private static void overlaySiPolicy(UpdateEventRequest request, SiPolicy baseline,
+                                        EventUpdateEventBuilder b) {
+        SiUsage usage = request.siUsage().isPresent() && request.siUsage().get() != null
+                ? SiUsage.valueOf(request.siUsage().get().name()) : baseline.usage();
+        boolean rentalAllowed = request.siRentalAllowed().isPresent() && request.siRentalAllowed().get() != null
+                ? request.siRentalAllowed().get() : baseline.rentalAllowed();
+        b.siPolicy(SiPolicy.of(usage, rentalAllowed));
     }
 
     /** present (incl. present-null) → apply; undefined → leave the baseline value. */

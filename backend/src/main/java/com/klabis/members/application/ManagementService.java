@@ -5,17 +5,21 @@ import com.klabis.common.users.UserId;
 import com.klabis.common.users.UserService;
 import com.klabis.members.BirthNumberAccessedEvent;
 import com.klabis.members.MemberId;
-import com.klabis.members.MemberSuspensionRequestedEvent;
 import com.klabis.members.MonetaryAmount;
+import com.klabis.members.OwnedGroup;
 import com.klabis.members.domain.Member;
+import com.klabis.members.domain.MemberFilter;
 import com.klabis.members.domain.MemberRepository;
 import org.jmolecules.ddd.annotation.Service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -27,14 +31,32 @@ public class ManagementService implements ManagementPort {
     private final UserService userService;
     private final ApplicationEventPublisher eventPublisher;
     private final MemberFinancialStatePort memberFinancialStatePort;
+    private final List<MemberOwnedGroupsPort> memberOwnedGroupsPorts;
+    private final MemberCompletenessPort memberCompletenessPort;
 
     public ManagementService(MemberRepository memberRepository, UserService userService,
                              ApplicationEventPublisher eventPublisher,
-                             Optional<MemberFinancialStatePort> memberFinancialStatePort) {
+                             Optional<MemberFinancialStatePort> memberFinancialStatePort,
+                             List<MemberOwnedGroupsPort> memberOwnedGroupsPorts,
+                             MemberCompletenessPort memberCompletenessPort) {
         this.memberRepository = memberRepository;
         this.userService = userService;
         this.eventPublisher = eventPublisher;
         this.memberFinancialStatePort = memberFinancialStatePort.orElseGet(NoOpMemberFinancialStatePort::new);
+        this.memberOwnedGroupsPorts = memberOwnedGroupsPorts;
+        this.memberCompletenessPort = memberCompletenessPort;
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public Page<Member> listMembers(MemberFilter filter, Pageable pageable) {
+        return memberRepository.findAll(filter, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public List<Member> listActiveMembers() {
+        return memberRepository.findAll(MemberFilter.activeOnly());
     }
 
     @Override
@@ -46,9 +68,20 @@ public class ManagementService implements ManagementPort {
     @Override
     public Member updateMember(MemberId memberId, Member.UpdateMember command) {
         Member member = loadMember(memberId);
-        member.update(command);
+        member.update(command, memberCompletenessPort.guardianContactsOf(member));
         Member saved = memberRepository.save(member);
         log.info("Member updated: memberId={}", memberId);
+        return saved;
+    }
+
+    @Transactional
+    @Override
+    public Member syncMemberFromOris(MemberId memberId, Member.SyncFromOris command) {
+        Member member = loadMember(memberId);
+        member.syncFromOris(command);
+        member.recordMissingData(memberCompletenessPort.missingData(member));
+        Member saved = memberRepository.save(member);
+        log.info("Member synced from ORIS: memberId={}", memberId);
         return saved;
     }
 
@@ -57,16 +90,17 @@ public class ManagementService implements ManagementPort {
     public Member suspendMember(MemberId memberId, Member.SuspendMembership command) {
         Member member = loadMember(memberId);
 
-        MemberSuspensionRequestedEvent event = new MemberSuspensionRequestedEvent(memberId);
-        eventPublisher.publishEvent(event);
+        List<OwnedGroup> blockingGroups = memberOwnedGroupsPorts.stream()
+                .flatMap(port -> port.findGroupsBlockingSuspension(memberId).stream())
+                .toList();
 
         MemberFinancialStatePort.MemberFinancialSnapshot snapshot = memberFinancialStatePort.getFinancialSnapshot(memberId);
 
-        boolean hasBlockingGroups = !event.blockingGroups().isEmpty();
+        boolean hasBlockingGroups = !blockingGroups.isEmpty();
         boolean hasOutstandingDebt = snapshot.hasOutstandingDebt();
         if (hasBlockingGroups || hasOutstandingDebt) {
             throw new SuspensionBlockedException(
-                    event.blockingGroups(),
+                    blockingGroups,
                     hasOutstandingDebt ? snapshot : null);
         }
 
@@ -112,22 +146,24 @@ public class ManagementService implements ManagementPort {
 
     @Transactional
     @Override
-    public Member getMemberAndRecordView(MemberId memberId, UserId viewedBy, boolean canManageMembers) {
+    public Member getMemberAndRecordView(MemberId memberId, UserId viewedBy, MemberViewAccess access) {
         Member member = memberRepository.findById(memberId)
                 .orElseThrow(() -> new MemberNotFoundException(memberId));
 
-        if (!canManageMembers && !member.isActive()) {
+        if (!access.suspendedVisible() && !member.isActive()) {
             throw new MemberNotFoundException(memberId);
         }
 
-        boolean isOwner = member.getUserId().equals(viewedBy);
-        boolean canSeeBirthNumber = canManageMembers || isOwner;
-
-        if (member.getBirthNumber() != null && canSeeBirthNumber) {
+        if (member.getBirthNumber() != null && access.birthNumberVisible()) {
             eventPublisher.publishEvent(BirthNumberAccessedEvent.viewed(viewedBy, memberId));
         }
 
         return member;
+    }
+
+    @Override
+    public Member getMember(MemberId memberId) {
+        return loadMember(memberId);
     }
 
     private Member loadMember(MemberId memberId) {

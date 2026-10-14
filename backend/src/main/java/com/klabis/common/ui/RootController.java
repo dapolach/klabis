@@ -1,5 +1,6 @@
 package com.klabis.common.ui;
 
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.mvc.MvcComponent;
 import com.klabis.common.security.KlabisJwtAuthenticationToken;
 import com.klabis.common.users.Authority;
@@ -24,14 +25,9 @@ class RootController implements RootApi {
     // Links are added in postprocessors from respective modules, bound on EntityModel<RootModel>.
     @Override
     public ResponseEntity<RootModel> rootNavigation() {
-        // RootModel is an empty marker with no domain object of its own, but HalResponseBodyAdvice
-        // only wraps a plain payload when the context holds a non-null domain — so a placeholder
-        // stands in for one. It is never serialized (EntityModelWithDomain.domainItem is @JsonIgnore).
-        HalResponseContext.setDomain(ROOT_DOMAIN_PLACEHOLDER);
+        HalResponseContext.markHalResource();
         return ResponseEntity.ok(new RootModel());
     }
-
-    private static final String ROOT_DOMAIN_PLACEHOLDER = "root";
 
 }
 
@@ -43,12 +39,18 @@ class RootController implements RootApi {
 @MvcComponent
 class RootAdminLinkProcessor implements RepresentationModelProcessor<EntityModel<RootModel>> {
 
+    private final AuthorizationEvaluator authorizationEvaluator;
+
+    RootAdminLinkProcessor(AuthorizationEvaluator authorizationEvaluator) {
+        this.authorizationEvaluator = authorizationEvaluator;
+    }
+
     @Override
     public EntityModel<RootModel> process(EntityModel<RootModel> model) {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication instanceof KlabisJwtAuthenticationToken klabisAuth
-            && klabisAuth.isAuthenticated()
-            && klabisAuth.hasAuthority(Authority.DEVELOPER)) {
+        if (authentication instanceof KlabisJwtAuthenticationToken
+            && authentication.isAuthenticated()
+            && authorizationEvaluator.has(Authority.DEVELOPER)) {
             model.add(Link.of("/admin").withRel("admin"));
         }
         return model;

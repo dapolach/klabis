@@ -1,10 +1,10 @@
 import {
-    HalFormsBoolean,
     HalFormsCheckbox,
     HalFormsCheckboxGroup,
     HalFormsCollectionField,
     HalFormsDateTime,
     HalFormsInput,
+    HalFormsMultiSelect,
     HalFormsRadio,
     HalFormsSelect,
     HalFormsTextArea,
@@ -33,7 +33,36 @@ export const halFormsFieldsFactory = (
     conf: HalFormsInputProps,
     customFactory?: CustomFieldFactory
 ): ReactElement | null => {
-    if (isMultipleProperty(conf.prop) && !conf.prop.options && !conf.prop.suggest) {
+    const multi = isMultipleProperty(conf.prop)
+
+    if (multi && !conf.prop.suggest) {
+        // Probe for a per-item widget with multi/multiple forced false (design.md D7), so the
+        // answer is always "does a widget exist for one item", never "what would it render for
+        // the raw multi value" — the only way to get MemberId right without misreading a
+        // self-guarding custom type (e.g. PaymentRuleRequest) as "no widget".
+        // The probe result is discarded: customFactory implementations must stay
+        // side-effect-free and defer any real work into the component they return.
+        const singleConf: HalFormsInputProps = {...conf, prop: {...conf.prop, multi: false, multiple: false}}
+        const hasCustomWidget = customFactory?.(fieldType, singleConf) != null
+
+        if (hasCustomWidget) {
+            // Render one row per item through that same custom widget, sharing the same
+            // options link across rows.
+            return <HalFormsCollectionField {...conf} fieldFactory={boundFactory(customFactory)} />
+        }
+
+        if (conf.prop.options) {
+            if (conf.prop.options.inline !== undefined && conf.prop.options.inline.length === 0) {
+                return null
+            }
+            // Generic multi-value widget for any option-backed field without its own custom
+            // widget (e.g. event type disciplineIds) — searchable dropdown + removable chips,
+            // working with both inline and remote-link options via useHalFormOptions.
+            return <HalFormsMultiSelect {...conf} />
+        }
+
+        // No options and no custom widget — a plain array of composite/basic values, e.g.
+        // categories, payment rules.
         return <HalFormsCollectionField {...conf} fieldFactory={boundFactory(customFactory)} />
     }
 
@@ -47,23 +76,22 @@ export const halFormsFieldsFactory = (
     }
 
     if (conf.prop.options) {
-        if (isMultipleProperty(conf.prop)) {
-            return <HalFormsCheckboxGroup {...conf} />
-        }
         return <HalFormsSelect {...conf} />
     }
 
+    // The backend renders java.lang.Boolean HAL-FORMS properties with type "Boolean"
+    // (Spring HATEOAS has no HtmlInputType for it); "boolean" covers the primitive.
     switch (fieldType) {
         case 'checkboxGroup':
             return <HalFormsCheckboxGroup {...conf} />
         case 'checkbox':
+        case 'Boolean':
+        case 'boolean':
             return <HalFormsCheckbox {...conf} />
         case 'radioGroup':
             return <HalFormsRadio {...conf} />
         case 'select':
             return <HalFormsSelect {...conf} />
-        case 'boolean':
-            return <HalFormsBoolean {...conf} />
         case 'textarea':
             return <HalFormsTextArea {...conf} />
         case 'datetime':

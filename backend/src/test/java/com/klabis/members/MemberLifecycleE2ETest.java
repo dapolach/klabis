@@ -1,12 +1,12 @@
 package com.klabis.members;
 
-import tools.jackson.databind.json.JsonMapper;
 import com.klabis.E2ETest;
 import com.klabis.common.WithKlabisMockUser;
 import com.klabis.common.email.EmailProperties;
 import com.klabis.common.email.EmailService;
 import com.klabis.common.email.LoggingEmailService;
 import com.klabis.common.users.Authority;
+import com.klabis.members.legalguardiangroup.domain.LegalGuardianGroupRepository;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -20,12 +20,12 @@ import org.springframework.test.context.jdbc.Sql;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.UnsupportedEncodingException;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -86,15 +86,11 @@ class MemberLifecycleE2ETest {
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private com.klabis.groups.application.LastOwnershipCheckerImpl lastOwnershipCheckerImpl;
-
-    @MockitoBean
-    @SuppressWarnings("unused")
     private com.klabis.groups.traininggroup.domain.TrainingGroupRepository trainingGroupRepository;
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private com.klabis.groups.familygroup.domain.FamilyGroupRepository familyGroupRepository;
+    private LegalGuardianGroupRepository legalGuardianGroupRepository;
 
     @Autowired
     private MockMvc mockMvc;
@@ -161,8 +157,21 @@ class MemberLifecycleE2ETest {
         final CurrentUserData registeredMemberUserData = createCurrentUserDataFromMemberResponse(memberDetailsResult);
 
         // ========================================================================
-        // STEP 4: Get email token from email (using LoggingEmailService)
+        // STEP 4: Request an activation link (no e-mail is sent on registration any
+        // more - design.md D7) and read the token from the email (LoggingEmailService)
         // ========================================================================
+        String registrationNumber = registeredMemberUserData.userName();
+
+        mockMvc.perform(post("/api/auth/password-setup/request")
+                        .contentType("application/json")
+                        .content("""
+                                {
+                                    "registrationNumber": "%s",
+                                    "email": "jan.novak@example.com"
+                                }
+                                """.formatted(registrationNumber)))
+                .andExpect(status().isOk());
+
         String activationToken = Awaitility.waitAtMost(Duration.ofSeconds(4))
                 .until(MemberLifecycleE2ETest::findActivationTokenInSentEmail, Optional::isPresent)
                 .orElseThrow();
@@ -343,7 +352,7 @@ class MemberLifecycleE2ETest {
             Map<String, Object> attributes = new JsonMapper().readValue(memberDetailResponse, Map.class);
             String registrationNumberValue = (String) attributes.get("registrationNumber");
             MemberId memberId = new MemberId(UUID.fromString((String) attributes.get("id")));
-            return new CurrentUserData(registrationNumberValue, memberId.toUserId(), memberId, Set.of());
+            return new CurrentUserData(registrationNumberValue, memberId.toUserId(), memberId);
         } catch (JacksonException e) {
             throw new RuntimeException(e);
         }

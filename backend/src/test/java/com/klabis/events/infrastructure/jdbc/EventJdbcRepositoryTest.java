@@ -35,6 +35,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import static com.klabis.events.EventTestDataBuilder.register;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -235,8 +236,8 @@ class EventJdbcRepositoryTest {
             SiCardNumber siCard1 = new SiCardNumber("123456");
             SiCardNumber siCard2 = new SiCardNumber("789012");
 
-            event.registerMember(member1Id, siCard1, null);
-            event.registerMember(member2Id, siCard2, null);
+            register(event, member1Id, siCard1, null);
+            register(event, member2Id, siCard2, null);
 
             // When
             Event savedEvent = eventRepository.save(event);
@@ -252,6 +253,63 @@ class EventJdbcRepositoryTest {
             assertThat(retrieved.getRegistrations())
                     .extracting(EventRegistration::siCardNumber)
                     .containsExactlyInAnyOrder(siCard1, siCard2);
+        }
+    }
+
+    @Nested
+    @DisplayName("save() and findById() - registration notes")
+    class SaveAndFindRegistrationNotes {
+
+        @Test
+        @DisplayName("should persist and reload both notes, and null notes stay null")
+        void shouldRoundTripNotes() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Notes Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .location("Test Location")
+                    .organizer("Test OC")
+                    .build());
+            event.publish();
+            MemberId withNotes = new MemberId(TEST_MEMBER_1_ID);
+            MemberId withoutNotes = new MemberId(TEST_MEMBER_2_ID);
+            event.registerMember(withNotes, EventRegisterCommandBuilder.builder().siCardNumber("123456").internalNote(RegistrationNote.ofNullable("internal")).orisNote(RegistrationNote.ofNullable("oris")).build());
+            register(event, withoutNotes, new SiCardNumber("789012"), null);
+
+            Event saved = eventRepository.save(event);
+            Event retrieved = eventRepository.findById(saved.getId()).orElseThrow();
+
+            EventRegistration noted = retrieved.findRegistration(withNotes).orElseThrow();
+            assertThat(noted.internalNote()).isEqualTo(RegistrationNote.ofNullable("internal"));
+            assertThat(noted.orisNote()).isEqualTo(RegistrationNote.ofNullable("oris"));
+            EventRegistration plain = retrieved.findRegistration(withoutNotes).orElseThrow();
+            assertThat(plain.internalNote()).isNull();
+            assertThat(plain.orisNote()).isNull();
+        }
+
+        @Test
+        @DisplayName("should persist and reload a registration without SI number and the rental request")
+        void shouldRoundTripAbsentSiNumberAndRental() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Rental Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .location("Test Location")
+                    .organizer("Test OC")
+                    .build());
+            event.publish();
+            MemberId renting = new MemberId(TEST_MEMBER_1_ID);
+            MemberId owning = new MemberId(TEST_MEMBER_2_ID);
+            event.registerMember(renting, EventRegisterCommandBuilder.builder().wantsToRentSi(true).build());
+            register(event, owning, new SiCardNumber("789012"), null);
+
+            Event saved = eventRepository.save(event);
+            Event retrieved = eventRepository.findById(saved.getId()).orElseThrow();
+
+            EventRegistration rented = retrieved.findRegistration(renting).orElseThrow();
+            assertThat(rented.siCardNumber()).isNull();
+            assertThat(rented.wantsToRentSi()).isTrue();
+            EventRegistration own = retrieved.findRegistration(owning).orElseThrow();
+            assertThat(own.siCardNumber()).isEqualTo(new SiCardNumber("789012"));
+            assertThat(own.wantsToRentSi()).isFalse();
         }
     }
 
@@ -340,6 +398,22 @@ class EventJdbcRepositoryTest {
 
             assertThat(draftPage.getContent()).hasSize(1);
             assertThat(draftPage.getContent().get(0).getName()).isEqualTo("Draft Event");
+        }
+
+        @Test
+        @DisplayName("should return empty page when filter allows no status")
+        void shouldReturnEmptyPageWhenFilterAllowsNoStatus() {
+            // Given
+            eventRepository.save(Event.create(EventCreateEventBuilder.builder()
+                    .name("Draft Event").eventDate(LocalDate.of(2026, 6, 10))
+                    .location("Location A").organizer("OOB").build()));
+
+            // When
+            Page<Event> page = eventRepository.findAll(EventFilter.byStatus(), PageRequest.of(0, 10));
+
+            // Then
+            assertThat(page.getContent()).isEmpty();
+            assertThat(page.getTotalElements()).isZero();
         }
     }
 
@@ -514,67 +588,6 @@ class EventJdbcRepositoryTest {
     }
 
     @Nested
-    @DisplayName("existsByOrisId() — ORIS duplicate detection")
-    class ExistsByOrisId {
-
-        @Test
-        @DisplayName("should return true for a saved event with the given orisId")
-        void shouldReturnTrueForSavedEventWithOrisId() {
-            // Given
-            Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(9876)
-                    .name("ORIS Imported Event")
-                    .eventDate(LocalDate.of(2026, 8, 15))
-                    .location("Test Location")
-                    .organizer("OOB")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=9876"))
-                    .build());
-            eventRepository.save(event);
-
-            // When & Then
-            assertThat(eventRepository.existsByOrisId(9876)).isTrue();
-        }
-
-        @Test
-        @DisplayName("should return false when no event with the given orisId exists")
-        void shouldReturnFalseWhenNoEventWithOrisId() {
-            // When & Then
-            assertThat(eventRepository.existsByOrisId(99999)).isFalse();
-        }
-
-        @Test
-        @DisplayName("should reject duplicate orisId via unique constraint")
-        void shouldRejectDuplicateOrisIdViaUniqueConstraint() {
-            // Given — save the first event with orisId 1111
-            Event first = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(1111)
-                    .name("First ORIS Event")
-                    .eventDate(LocalDate.of(2026, 9, 1))
-                    .location("Location A")
-                    .organizer("PRG")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=1111"))
-                    .build());
-            eventRepository.save(first);
-
-            // When — create and save a second event with same orisId
-            Event second = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(1111)
-                    .name("Duplicate ORIS Event")
-                    .eventDate(LocalDate.of(2026, 9, 10))
-                    .location("Location B")
-                    .organizer("BRN")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=1111"))
-                    .build());
-
-            // Then — DB unique constraint rejects the duplicate
-            org.junit.jupiter.api.Assertions.assertThrows(
-                    Exception.class,
-                    () -> eventRepository.save(second)
-            );
-        }
-    }
-
-    @Nested
     @DisplayName("Unique constraint on (event_id, member_id)")
     class UniqueConstraintEventMember {
 
@@ -588,7 +601,7 @@ class EventJdbcRepositoryTest {
             MemberId memberId = new MemberId(TEST_MEMBER_1_ID);
             SiCardNumber siCard = new SiCardNumber("123456");
 
-            event.registerMember(memberId, siCard, null);
+            register(event, memberId, siCard, null);
             eventRepository.save(event);
 
             // When - try to register same member again (domain should prevent this)
@@ -912,7 +925,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             eventWithRegistration.publish();
-            eventWithRegistration.registerMember(registeredMember, new SiCardNumber("111111"), null);
+            register(eventWithRegistration, registeredMember, new SiCardNumber("111111"), null);
             eventRepository.save(eventWithRegistration);
 
             Event eventWithoutRegistration = Event.create(EventCreateEventBuilder.builder()
@@ -922,7 +935,7 @@ class EventJdbcRepositoryTest {
                     .organizer("PRG")
                     .build());
             eventWithoutRegistration.publish();
-            eventWithoutRegistration.registerMember(otherMember, new SiCardNumber("222222"), null);
+            register(eventWithoutRegistration, otherMember, new SiCardNumber("222222"), null);
             eventRepository.save(eventWithoutRegistration);
 
             Page<Event> result = eventRepository.findAll(
@@ -946,7 +959,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             event.publish();
-            event.registerMember(new MemberId(TEST_MEMBER_1_ID), new SiCardNumber("111111"), null);
+            register(event, new MemberId(TEST_MEMBER_1_ID), new SiCardNumber("111111"), null);
             eventRepository.save(event);
 
             Page<Event> result = eventRepository.findAll(
@@ -969,7 +982,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             cancelledEvent.publish();
-            cancelledEvent.registerMember(member, new SiCardNumber("111111"), null);
+            register(cancelledEvent, member, new SiCardNumber("111111"), null);
             cancelledEvent.cancel();
             eventRepository.save(cancelledEvent);
 
@@ -1004,7 +1017,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             finishedEvent.publish();
-            finishedEvent.registerMember(member, new SiCardNumber("111111"), null);
+            register(finishedEvent, member, new SiCardNumber("111111"), null);
             eventRepository.save(finishedEvent);
             // Reload, finish, and re-save
             Event reload = eventRepository.findById(finishedEvent.getId()).orElseThrow();
@@ -1040,7 +1053,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             matchingEvent.publish();
-            matchingEvent.registerMember(member, new SiCardNumber("111111"), null);
+            register(matchingEvent, member, new SiCardNumber("111111"), null);
             eventRepository.save(matchingEvent);
 
             Event registeredButNoMatch = Event.create(EventCreateEventBuilder.builder()
@@ -1050,7 +1063,7 @@ class EventJdbcRepositoryTest {
                     .organizer("PRG")
                     .build());
             registeredButNoMatch.publish();
-            registeredButNoMatch.registerMember(member, new SiCardNumber("222222"), null);
+            register(registeredButNoMatch, member, new SiCardNumber("222222"), null);
             eventRepository.save(registeredButNoMatch);
 
             Page<Event> result = eventRepository.findAll(
@@ -1060,6 +1073,246 @@ class EventJdbcRepositoryTest {
 
             assertThat(result.getContent()).hasSize(1);
             assertThat(result.getContent().get(0).getName()).isEqualTo("Praha Open");
+        }
+    }
+
+    @Nested
+    @DisplayName("Filter by cancelledVisibleTo — cancelled visibility rule")
+    class FilterByCancelledVisibleTo {
+
+        @Test
+        @DisplayName("should return the member's cancelled event and every non-cancelled event, hiding others' cancelled ones")
+        void shouldReturnOnlyOwnCancelledEventPlusNonCancelledEvents() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+
+            Event ownCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Own Cancelled")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OOB")
+                    .build());
+            ownCancelled.publish();
+            register(ownCancelled, member, new SiCardNumber("111111"), null);
+            ownCancelled.cancel();
+            eventRepository.save(ownCancelled);
+
+            Event someoneElsesCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Someone Elses Cancelled")
+                    .eventDate(LocalDate.now().plusDays(31))
+                    .organizer("OOB")
+                    .build());
+            someoneElsesCancelled.publish();
+            register(someoneElsesCancelled, new MemberId(TEST_MEMBER_2_ID), new SiCardNumber("222222"), null);
+            someoneElsesCancelled.cancel();
+            eventRepository.save(someoneElsesCancelled);
+
+            Event activeEvent = Event.create(EventCreateEventBuilder.builder()
+                    .name("Active Event")
+                    .eventDate(LocalDate.now().plusDays(32))
+                    .organizer("OOB")
+                    .build());
+            activeEvent.publish();
+            eventRepository.save(activeEvent);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.none().withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent())
+                    .extracting(Event::getName)
+                    .containsExactlyInAnyOrder("Own Cancelled", "Active Event");
+        }
+
+        @Test
+        @DisplayName("should count only the visible rows so the page total matches the content")
+        void shouldCountOnlyVisibleRows() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+
+            Event ownCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Own Cancelled")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OOB")
+                    .build());
+            ownCancelled.publish();
+            register(ownCancelled, member, new SiCardNumber("111111"), null);
+            ownCancelled.cancel();
+            eventRepository.save(ownCancelled);
+
+            Event someoneElsesCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Someone Elses Cancelled")
+                    .eventDate(LocalDate.now().plusDays(31))
+                    .organizer("OOB")
+                    .build());
+            someoneElsesCancelled.publish();
+            register(someoneElsesCancelled, new MemberId(TEST_MEMBER_2_ID), new SiCardNumber("222222"), null);
+            someoneElsesCancelled.cancel();
+            eventRepository.save(someoneElsesCancelled);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.none().withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getTotalElements()).isEqualTo(1);
+            assertThat(result.getContent()).extracting(Event::getName).containsExactly("Own Cancelled");
+        }
+
+        @Test
+        @DisplayName("should return no cancelled events when the member has none registered — empty id list branch")
+        void shouldExcludeAllCancelledEventsWhenMemberHasNoCancelledRegistrations() {
+            MemberId member = new MemberId(TEST_MEMBER_3_ID);
+
+            Event cancelledEvent = Event.create(EventCreateEventBuilder.builder()
+                    .name("Cancelled Event")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OOB")
+                    .build());
+            cancelledEvent.publish();
+            register(cancelledEvent, new MemberId(TEST_MEMBER_1_ID), new SiCardNumber("111111"), null);
+            cancelledEvent.cancel();
+            eventRepository.save(cancelledEvent);
+
+            Event activeEvent = Event.create(EventCreateEventBuilder.builder()
+                    .name("Active Event")
+                    .eventDate(LocalDate.now().plusDays(31))
+                    .organizer("OOB")
+                    .build());
+            activeEvent.publish();
+            eventRepository.save(activeEvent);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.none().withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent()).extracting(Event::getName).containsExactly("Active Event");
+        }
+
+        @Test
+        @DisplayName("should AND the visibility rule with the fulltext pre-filter")
+        void shouldCombineWithFulltextPreFilter() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+
+            Event ownCancelledMatching = Event.create(EventCreateEventBuilder.builder()
+                    .name("Praha Cup")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OOB")
+                    .build());
+            ownCancelledMatching.publish();
+            register(ownCancelledMatching, member, new SiCardNumber("111111"), null);
+            ownCancelledMatching.cancel();
+            eventRepository.save(ownCancelledMatching);
+
+            Event ownCancelledNotMatching = Event.create(EventCreateEventBuilder.builder()
+                    .name("Brno Cup")
+                    .eventDate(LocalDate.now().plusDays(31))
+                    .organizer("OOB")
+                    .build());
+            ownCancelledNotMatching.publish();
+            register(ownCancelledNotMatching, member, new SiCardNumber("222222"), null);
+            ownCancelledNotMatching.cancel();
+            eventRepository.save(ownCancelledNotMatching);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.none().withFulltext("Praha").withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent()).extracting(Event::getName).containsExactly("Praha Cup");
+        }
+
+        @Test
+        @DisplayName("should AND the visibility disjunction with a non-empty status set — the disjunction must stay a nested group")
+        void shouldAndVisibilityDisjunctionWithStatusSetOnOrganizer() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+
+            Event orgACancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Org A Cancelled")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OrgA")
+                    .build());
+            orgACancelled.publish();
+            register(orgACancelled, member, new SiCardNumber("111111"), null);
+            orgACancelled.cancel();
+            eventRepository.save(orgACancelled);
+
+            Event orgBCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Org B Cancelled")
+                    .eventDate(LocalDate.now().plusDays(31))
+                    .organizer("OrgB")
+                    .build());
+            orgBCancelled.publish();
+            register(orgBCancelled, member, new SiCardNumber("222222"), null);
+            orgBCancelled.cancel();
+            eventRepository.save(orgBCancelled);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.byStatus(EventStatus.CANCELLED).withOrganizer("OrgA").withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent()).extracting(Event::getName).containsExactly("Org A Cancelled");
+            assertThat(result.getTotalElements()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("should AND the visibility disjunction with a date range — the disjunction must stay a nested group")
+        void shouldAndVisibilityDisjunctionWithDateRange() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+            LocalDate today = LocalDate.now();
+
+            Event inWindowCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("In Window Cancelled")
+                    .eventDate(today.plusDays(10))
+                    .organizer("OOB")
+                    .build());
+            inWindowCancelled.publish();
+            register(inWindowCancelled, member, new SiCardNumber("111111"), null);
+            inWindowCancelled.cancel();
+            eventRepository.save(inWindowCancelled);
+
+            Event outOfWindowCancelled = Event.create(EventCreateEventBuilder.builder()
+                    .name("Out Of Window Cancelled")
+                    .eventDate(today.plusDays(20))
+                    .organizer("OOB")
+                    .build());
+            outOfWindowCancelled.publish();
+            register(outOfWindowCancelled, member, new SiCardNumber("222222"), null);
+            outOfWindowCancelled.cancel();
+            eventRepository.save(outOfWindowCancelled);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.byStatus(EventStatus.CANCELLED)
+                            .withDateRange(today.plusDays(9), today.plusDays(11))
+                            .withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent()).extracting(Event::getName).containsExactly("In Window Cancelled");
+            assertThat(result.getTotalElements()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("byStatus(ACTIVE) yields no rows even when cancelledVisibleTo is set")
+        void shouldReturnNothingWhenFilterExcludesCancelled() {
+            MemberId member = new MemberId(TEST_MEMBER_1_ID);
+
+            Event cancelledEvent = Event.create(EventCreateEventBuilder.builder()
+                    .name("Cancelled Event")
+                    .eventDate(LocalDate.now().plusDays(30))
+                    .organizer("OOB")
+                    .build());
+            cancelledEvent.publish();
+            register(cancelledEvent, member, new SiCardNumber("111111"), null);
+            cancelledEvent.cancel();
+            eventRepository.save(cancelledEvent);
+
+            Page<Event> result = eventRepository.findAll(
+                    EventFilter.byStatus(EventStatus.ACTIVE).withCancelledVisibleTo(member),
+                    PageRequest.of(0, 10)
+            );
+
+            assertThat(result.getContent()).isEmpty();
         }
     }
 
@@ -1208,7 +1461,7 @@ class EventJdbcRepositoryTest {
                     .organizer("OOB")
                     .build());
             registeredEvent.publish();
-            registeredEvent.registerMember(member, new SiCardNumber("111111"), null);
+            register(registeredEvent, member, new SiCardNumber("111111"), null);
             eventRepository.save(registeredEvent);
 
             Event notRegisteredEvent = Event.create(EventCreateEventBuilder.builder()
@@ -1254,13 +1507,13 @@ class EventJdbcRepositoryTest {
             Event event1 = Event.create(EventCreateEventBuilder.builder()
                     .name("Event 1").eventDate(LocalDate.now().plusDays(30)).organizer("OOB").build());
             event1.publish();
-            event1.registerMember(member, new SiCardNumber("111111"), null);
+            register(event1, member, new SiCardNumber("111111"), null);
             eventRepository.save(event1);
 
             Event event2 = Event.create(EventCreateEventBuilder.builder()
                     .name("Event 2").eventDate(LocalDate.now().plusDays(31)).organizer("OOB").build());
             event2.publish();
-            event2.registerMember(member, new SiCardNumber("222222"), null);
+            register(event2, member, new SiCardNumber("222222"), null);
             eventRepository.save(event2);
 
             Page<Event> result = eventRepository.findAll(
@@ -1300,7 +1553,7 @@ class EventJdbcRepositoryTest {
                     .registrationDeadlines(RegistrationDeadlines.single(today.plusDays(6)))
                     .build());
             alreadyRegistered.publish();
-            alreadyRegistered.registerMember(member, new SiCardNumber("111111"), null);
+            register(alreadyRegistered, member, new SiCardNumber("111111"), null);
             eventRepository.save(alreadyRegistered);
 
             // Event C: ACTIVE, deadline outside window → excluded by deadlineWithin
@@ -1390,92 +1643,6 @@ class EventJdbcRepositoryTest {
     }
 
     @Nested
-    @DisplayName("findAllUpcomingOrisEvents() — events eligible for bulk sync")
-    class FindAllUpcomingOrisEvents {
-
-        private static final LocalDate TODAY = LocalDate.of(2026, 6, 1);
-
-        @Test
-        @DisplayName("should return DRAFT and ACTIVE events with orisId and date >= today")
-        void shouldReturnEligibleDraftAndActiveEvents() {
-            Event draftOris = saveOrisEvent("Future DRAFT", EventStatus.DRAFT, TODAY, 101);
-            Event activeOris = saveOrisEvent("Future ACTIVE", EventStatus.ACTIVE, TODAY.plusDays(5), 102);
-
-            java.util.List<Event> result = eventRepository.findAllUpcomingOrisEvents(TODAY);
-
-            assertThat(result).extracting(Event::getName)
-                    .containsExactlyInAnyOrder("Future DRAFT", "Future ACTIVE");
-        }
-
-        @Test
-        @DisplayName("should exclude events without orisId even if status and date match")
-        void shouldExcludeNonOrisEvents() {
-            saveManualEvent("Manual future DRAFT", EventStatus.DRAFT, TODAY.plusDays(1));
-            saveOrisEvent("ORIS future DRAFT", EventStatus.DRAFT, TODAY.plusDays(1), 201);
-
-            java.util.List<Event> result = eventRepository.findAllUpcomingOrisEvents(TODAY);
-
-            assertThat(result).extracting(Event::getName).containsExactly("ORIS future DRAFT");
-        }
-
-        @Test
-        @DisplayName("should exclude events with status FINISHED or CANCELLED")
-        void shouldExcludeTerminalStatusEvents() {
-            saveOrisEvent("Past FINISHED", EventStatus.FINISHED, TODAY.plusDays(1), 301);
-            saveOrisEvent("Past CANCELLED", EventStatus.CANCELLED, TODAY.plusDays(1), 302);
-            saveOrisEvent("Future DRAFT", EventStatus.DRAFT, TODAY.plusDays(1), 303);
-
-            java.util.List<Event> result = eventRepository.findAllUpcomingOrisEvents(TODAY);
-
-            assertThat(result).extracting(Event::getName).containsExactly("Future DRAFT");
-        }
-
-        @Test
-        @DisplayName("should exclude events whose eventDate is before today")
-        void shouldExcludePastEvents() {
-            saveOrisEvent("Past event", EventStatus.ACTIVE, TODAY.minusDays(1), 401);
-            saveOrisEvent("Today event", EventStatus.ACTIVE, TODAY, 402);
-            saveOrisEvent("Future event", EventStatus.ACTIVE, TODAY.plusDays(1), 403);
-
-            java.util.List<Event> result = eventRepository.findAllUpcomingOrisEvents(TODAY);
-
-            assertThat(result).extracting(Event::getName)
-                    .containsExactlyInAnyOrder("Today event", "Future event");
-        }
-
-        private Event saveOrisEvent(String name, EventStatus status, LocalDate date, int orisId) {
-            Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(orisId)
-                    .name(name)
-                    .eventDate(date)
-                    .location("Location")
-                    .organizer("OOB")
-                    .build());
-            if (status == EventStatus.ACTIVE) {
-                event.publish();
-            } else if (status == EventStatus.FINISHED) {
-                event.publish();
-                event.finish();
-            } else if (status == EventStatus.CANCELLED) {
-                event.cancel();
-            }
-            return eventRepository.save(event);
-        }
-
-        private Event saveManualEvent(String name, EventStatus status, LocalDate date) {
-            Event event = Event.create(EventCreateEventBuilder.builder()
-                    .name(name)
-                    .eventDate(date)
-                    .organizer("OOB")
-                    .build());
-            if (status == EventStatus.ACTIVE) {
-                event.publish();
-            }
-            return eventRepository.save(event);
-        }
-    }
-
-    @Nested
     @DisplayName("EventRanking persistence — round-trip")
     class EventRankingPersistence {
 
@@ -1484,7 +1651,6 @@ class EventJdbcRepositoryTest {
         void shouldPersistAndReloadEventRanking() {
             EventRanking ranking = EventRanking.of(3, "MN", "Mistrovství národa");
             Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(5001)
                     .name("Ranking Event")
                     .eventDate(LocalDate.of(2026, 9, 1))
                     .location("Forest")
@@ -1520,7 +1686,6 @@ class EventJdbcRepositoryTest {
         @DisplayName("should persist updated ranking after event update")
         void shouldPersistUpdatedRanking() {
             Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(5002)
                     .name("Ranking Update Event")
                     .eventDate(LocalDate.of(2026, 9, 3))
                     .location("Forest")
@@ -1550,7 +1715,6 @@ class EventJdbcRepositoryTest {
         void shouldPersistAndReloadBaseEntryFee() {
             Money fee = Money.of(new BigDecimal("350.00"), Currency.getInstance("CZK"));
             Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(6001)
                     .name("Entry Fee Event")
                     .eventDate(LocalDate.of(2026, 10, 1))
                     .location("Forest")
@@ -1586,7 +1750,6 @@ class EventJdbcRepositoryTest {
         void shouldPersistAndReloadBaseEntryFeeWithDecimalPrecision() {
             Money fee = Money.of(new BigDecimal("199.50"), Currency.getInstance("CZK"));
             Event event = Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(6002)
                     .name("Decimal Fee Event")
                     .eventDate(LocalDate.of(2026, 10, 3))
                     .location("Forest")
@@ -1602,45 +1765,116 @@ class EventJdbcRepositoryTest {
     }
 
     @Nested
-    @DisplayName("findImportedOrisIds() — batch lookup of already-imported ORIS IDs")
-    class FindImportedOrisIds {
+    @DisplayName("SI policy persistence — round-trip")
+    class SiPolicyPersistence {
 
         @Test
-        @DisplayName("should return only the candidate IDs that already exist in DB")
-        void shouldReturnOnlyExistingCandidateIds() {
-            eventRepository.save(Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(1001).name("Imported Race A").eventDate(LocalDate.of(2026, 8, 1))
-                    .location("Location").organizer("OOB")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=1001")).build()));
-            eventRepository.save(Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(1002).name("Imported Race B").eventDate(LocalDate.of(2026, 8, 2))
-                    .location("Location").organizer("OOB")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=1002")).build()));
+        @DisplayName("should persist and reload an explicit SI policy")
+        void shouldPersistAndReloadPolicy() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("SI Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .siPolicy(SiPolicy.of(SiUsage.OPTIONAL, true))
+                    .build());
 
-            Set<Integer> result = eventRepository.findImportedOrisIds(List.of(1001, 1002, 9999));
+            Event saved = eventRepository.save(event);
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
 
-            assertThat(result).containsExactlyInAnyOrder(1001, 1002);
+            assertThat(reloaded.getSiPolicy()).isEqualTo(SiPolicy.of(SiUsage.OPTIONAL, true));
         }
 
         @Test
-        @DisplayName("should return empty set when no candidates match")
-        void shouldReturnEmptySetWhenNoCandidatesMatch() {
-            eventRepository.save(Event.createFromOris(EventCreateEventFromOrisBuilder.builder()
-                    .orisId(2001).name("Race Z").eventDate(LocalDate.of(2026, 9, 1))
-                    .location("Location").organizer("OOB")
-                    .websiteUrl(new WebsiteUrl("https://oris.ceskyorientak.cz/Zavod?id=2001")).build()));
+        @DisplayName("should reload the default policy of an event created without one")
+        void shouldReloadDefaultPolicy() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Plain Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .build());
 
-            Set<Integer> result = eventRepository.findImportedOrisIds(List.of(9998, 9997));
+            Event saved = eventRepository.save(event);
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
 
-            assertThat(result).isEmpty();
+            assertThat(reloaded.getSiPolicy()).isEqualTo(SiPolicy.defaultPolicy());
         }
 
         @Test
-        @DisplayName("should return empty set for empty candidate collection without querying DB")
-        void shouldReturnEmptySetForEmptyCandidateCollection() {
-            Set<Integer> result = eventRepository.findImportedOrisIds(List.of());
+        @DisplayName("should persist a changed policy")
+        void shouldPersistChangedPolicy() {
+            Event saved = eventRepository.save(Event.create(EventCreateEventBuilder.builder()
+                    .name("Changing Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .build()));
+            saved.update(EventUpdateEventBuilder.builder(Event.UpdateEvent.from(saved))
+                    .siPolicy(SiPolicy.of(SiUsage.NOT_USED, false))
+                    .build());
+            eventRepository.save(saved);
 
-            assertThat(result).isEmpty();
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
+
+            assertThat(reloaded.getSiPolicy()).isEqualTo(SiPolicy.of(SiUsage.NOT_USED, false));
+        }
+    }
+
+    @Nested
+    @DisplayName("Shared-service offer flags persistence — round-trip")
+    class SharedServiceFlagsPersistence {
+
+        @Test
+        @DisplayName("should persist and reload both event offer flags when enabled")
+        void shouldPersistAndReloadEnabledFlags() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Shared Services Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .sharedTransportEnabled(true)
+                    .sharedAccommodationEnabled(true)
+                    .build());
+
+            Event saved = eventRepository.save(event);
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
+
+            assertThat(reloaded.isSharedTransportEnabled()).isTrue();
+            assertThat(reloaded.isSharedAccommodationEnabled()).isTrue();
+        }
+
+        @Test
+        @DisplayName("should default both event offer flags to false when not set")
+        void shouldDefaultFlagsToFalse() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Plain Event")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .build());
+
+            Event saved = eventRepository.save(event);
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
+
+            assertThat(reloaded.isSharedTransportEnabled()).isFalse();
+            assertThat(reloaded.isSharedAccommodationEnabled()).isFalse();
+        }
+
+        @Test
+        @DisplayName("should persist and reload a registration's shared-service choices")
+        void shouldPersistAndReloadRegistrationChoices() {
+            Event event = Event.create(EventCreateEventBuilder.builder()
+                    .name("Event With Choosy Member")
+                    .eventDate(LocalDate.now().plusDays(60))
+                    .organizer("OOB")
+                    .sharedAccommodationEnabled(true)
+                    .build());
+            event.publish();
+            MemberId memberId = new MemberId(TEST_MEMBER_1_ID);
+            event.registerMember(memberId, EventRegisterCommandBuilder.builder().siCardNumber("123456").wantsSharedAccommodation(true).build());
+
+            Event saved = eventRepository.save(event);
+            Event reloaded = eventRepository.findById(saved.getId()).orElseThrow();
+
+            EventRegistration registration = reloaded.findRegistration(memberId).orElseThrow();
+            assertThat(registration.wantsSharedTransport()).isFalse();
+            assertThat(registration.wantsSharedAccommodation()).isTrue();
         }
     }
 
@@ -1887,6 +2121,30 @@ class EventJdbcRepositoryTest {
             assertThat(result.getContent())
                     .extracting(Event::getId)
                     .containsExactly(saved.getId());
+        }
+    }
+
+    @Nested
+    @DisplayName("Coordinated event ids")
+    class CoordinatedEventIds {
+
+        @Test
+        @DisplayName("returns ids of all events the member coordinates and no others")
+        void shouldReturnOnlyCoordinatedEventIds() {
+            MemberId coordA = new MemberId(TEST_MEMBER_1_ID);
+            MemberId coordB = new MemberId(TEST_MEMBER_2_ID);
+
+            Event coordinatedByBoth = eventRepository.save(Event.create(EventCreateEventBuilder.builder()
+                    .name("Both").eventDate(LocalDate.of(2026, 9, 1)).organizer("OOB")
+                    .coordinators(new LinkedHashSet<>(List.of(coordA, coordB))).build()));
+            Event coordinatedByB = eventRepository.save(Event.create(EventCreateEventBuilder.builder()
+                    .name("B only").eventDate(LocalDate.of(2026, 9, 2)).organizer("OOB")
+                    .coordinators(new LinkedHashSet<>(List.of(coordB))).build()));
+
+            assertThat(eventRepository.findIdsCoordinatedBy(coordA)).containsExactly(coordinatedByBoth.getId());
+            assertThat(eventRepository.findIdsCoordinatedBy(coordB))
+                    .containsExactlyInAnyOrder(coordinatedByBoth.getId(), coordinatedByB.getId());
+            assertThat(eventRepository.findIdsCoordinatedBy(new MemberId(TEST_MEMBER_3_ID))).isEmpty();
         }
     }
 

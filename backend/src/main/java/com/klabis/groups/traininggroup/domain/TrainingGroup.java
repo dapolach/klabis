@@ -1,10 +1,11 @@
 package com.klabis.groups.traininggroup.domain;
 
 import com.klabis.common.domain.AuditMetadata;
+import com.klabis.common.groups.domain.CannotRemoveLastOwnerException;
+import com.klabis.common.groups.domain.GroupMembership;
+import com.klabis.common.groups.domain.MemberGroup;
+import com.klabis.common.users.Authority;
 import com.klabis.groups.MemberAssignedToTrainingGroupEvent;
-import com.klabis.groups.common.domain.CannotRemoveLastOwnerException;
-import com.klabis.groups.common.domain.GroupMembership;
-import com.klabis.groups.common.domain.MemberGroup;
 import com.klabis.groups.traininggroup.TrainingGroupId;
 import com.klabis.members.MemberId;
 import io.soabase.recordbuilder.core.RecordBuilder;
@@ -19,7 +20,7 @@ import java.util.Set;
 import java.util.UUID;
 
 @AggregateRoot
-public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId> {
+public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId, MemberId> {
 
     public static final String TYPE_DISCRIMINATOR = "TRAINING";
 
@@ -27,7 +28,7 @@ public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId> {
     private final TrainingGroupId id;
     private AgeRange ageRange;
 
-    private TrainingGroup(TrainingGroupId id, String name, Set<MemberId> trainers, Set<GroupMembership> members, AgeRange ageRange) {
+    private TrainingGroup(TrainingGroupId id, String name, Set<MemberId> trainers, Set<GroupMembership<MemberId>> members, AgeRange ageRange) {
         super(name, trainers, members);
         Assert.notNull(id, "TrainingGroupId is required");
         Assert.notNull(ageRange, "AgeRange is required");
@@ -51,7 +52,7 @@ public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId> {
     }
 
     public static TrainingGroup reconstruct(TrainingGroupId id, String name, Set<MemberId> trainers,
-                                            Set<GroupMembership> members, AgeRange ageRange,
+                                            Set<GroupMembership<MemberId>> members, AgeRange ageRange,
                                             AuditMetadata auditMetadata) {
         TrainingGroup group = new TrainingGroup(id, name, trainers, members, ageRange);
         group.updateAuditMetadata(auditMetadata);
@@ -61,6 +62,11 @@ public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId> {
     @Override
     public TrainingGroupId getId() {
         return id;
+    }
+
+    @Override
+    public Set<Authority> delegatedAuthorities() {
+        return Set.of();
     }
 
     public AgeRange getAgeRange() {
@@ -102,9 +108,24 @@ public class TrainingGroup extends MemberGroup<TrainingGroup, TrainingGroupId> {
         }
     }
 
-    public void assignEligibleMember(MemberId memberId) {
+    /**
+     * Manual path: the caller named a specific person, so being a trainer of this group is rejected by
+     * {@link #addMember} rather than silently skipped the way the automatic age-based paths skip.
+     */
+    public void addTrainee(MemberId memberId) {
         addMember(memberId);
         registerEvent(new MemberAssignedToTrainingGroupEvent(memberId, id, getName(), Instant.now()));
+    }
+
+    /**
+     * Age-based assignment runs over every eligible member, including the group's own trainers. A trainer
+     * is never a trainee of the group they train, so those are skipped silently rather than reported.
+     */
+    public void assignEligibleMember(MemberId memberId) {
+        if (hasTrainer(memberId)) {
+            return;
+        }
+        addTrainee(memberId);
     }
 
     public void removeMember(MemberId memberId) {

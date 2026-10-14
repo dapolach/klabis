@@ -1,24 +1,28 @@
 package com.klabis.common.encryption;
 
-import org.jasypt.encryption.pbe.PooledPBEStringEncryptor;
-import org.jasypt.iv.RandomIvGenerator;
+import org.springframework.security.crypto.encrypt.AesGcmBytesEncryptor;
+import org.springframework.security.crypto.encrypt.BytesEncryptor;
 
-/**
- * Shared encryption service for consistent encryption/decryption operations.
- * Uses a single encryptor instance to ensure encrypted values can be decrypted.
- */
-class SharedEncryptionService implements com.klabis.common.encryption.EncryptionService {
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
 
-    private final PooledPBEStringEncryptor encryptor;
+class SharedEncryptionService implements EncryptionService {
 
-    public SharedEncryptionService(String encryptionPassword, String algorithm) {
+    private final BytesEncryptor encryptor;
 
-        this.encryptor = new PooledPBEStringEncryptor();
-        this.encryptor.setPoolSize(2);
-        this.encryptor.setPassword(encryptionPassword);
-        this.encryptor.setAlgorithm(algorithm);
-        this.encryptor.setIvGenerator(new RandomIvGenerator());
-        this.encryptor.setStringOutputType("BASE64");
+    SharedEncryptionService(String password, String hexSalt) {
+        this.encryptor = AesGcmBytesEncryptor.withPassword(password, requireValidHexSalt(hexSalt)).build();
+    }
+
+    private static String requireValidHexSalt(String hexSalt) {
+        boolean valid = hexSalt != null && !hexSalt.isEmpty() && HexFormat.isHexDigit(hexSalt.charAt(0))
+                && hexSalt.length() % 2 == 0 && hexSalt.chars().allMatch(HexFormat::isHexDigit);
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "klabis.encryption.salt must be a non-empty hex string with an even number of characters "
+                            + "(generate one with: openssl rand -hex 16)");
+        }
+        return hexSalt;
     }
 
     @Override
@@ -26,7 +30,8 @@ class SharedEncryptionService implements com.klabis.common.encryption.Encryption
         if (plaintext == null) {
             return null;
         }
-        return encryptor.encrypt(plaintext);
+        byte[] encrypted = encryptor.encrypt(plaintext.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(encrypted);
     }
 
     @Override
@@ -34,6 +39,7 @@ class SharedEncryptionService implements com.klabis.common.encryption.Encryption
         if (encrypted == null) {
             return null;
         }
-        return encryptor.decrypt(encrypted);
+        byte[] decrypted = encryptor.decrypt(HexFormat.of().parseHex(encrypted));
+        return new String(decrypted, StandardCharsets.UTF_8);
     }
 }

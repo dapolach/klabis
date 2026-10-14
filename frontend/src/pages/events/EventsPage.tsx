@@ -1,5 +1,4 @@
 import {type ReactElement, useState} from "react";
-import {useAuthorizedQuery} from "../../hooks/useAuthorizedFetch.ts";
 import type {HalFormsTemplate, HalResourceLinks, Link} from "../../api";
 import type {components} from "../../api/klabisApi";
 import {TableCell} from "../../components/KlabisTable";
@@ -10,8 +9,8 @@ import {asLinkArray, toHref} from "../../api/hateoas.ts";
 import {HalRouteProvider} from "../../contexts/HalRouteContext.tsx";
 import {useHalRoute} from "../../contexts/halRouteContext.ts";
 import {formatDate, getFutureDeadlines, getRelevantDeadlineIndex} from "../../utils/dateUtils.ts";
-import {normalizeKlabisApiPath} from "../../utils/halFormsUtils.ts";
 import {getActionVariant} from "../../utils/actionVariants.ts";
+import {EventRegistrationDialog} from "../../components/events/EventRegistrationDialog.tsx";
 import {useHalPageData} from "../../hooks/useHalPageData.ts";
 import {getDialogTitleLabel, getEnumLabel, getTemplateLabel, labels} from "../../localization";
 import {ImportOrisEventModal} from "../../components/events/ImportOrisEventModal.tsx";
@@ -23,9 +22,11 @@ import {HalFormButton} from "../../components/HalNavigator2/HalFormButton.tsx";
 import {Section} from "../members/MemberSection.tsx";
 import type {HalFormPanelRenderHelpers} from "../../components/HalNavigator2/HalFormPanel.tsx";
 import {MemberName} from "../../components/members/MemberName.tsx";
-import {ExternalLink, Globe, Pencil, RefreshCw, UserMinus, UserPlus, XCircle} from "lucide-react";
+import {ExternalLink, Globe, Pencil, UserMinus, UserPlus, XCircle} from "lucide-react";
 import {EventsFilterBar} from "../../components/events/EventsFilterBar.tsx";
+import {EventSiPolicyFields} from "../../components/events/EventSiPolicyFields.tsx";
 import {EventTypeBadge} from "../../components/events/EventTypeBadge.tsx";
+import {SyncStatusIndicator} from "../../components/sync/SyncStatusIndicator.tsx";
 import {useAuth} from "../../contexts/authContext";
 import {useEventTypes} from "../../hooks/useEventTypes.ts";
 import {getTodayIso} from "../../components/events/eventsFilterUtils.ts";
@@ -45,7 +46,6 @@ const ROW_ACTION_BUTTONS = [
     {name: 'updateEvent', icon: Pencil, label: labels.templates.updateEvent},
     {name: 'publishEvent', icon: Globe, label: labels.templates.publishEvent},
     {name: 'cancelEvent', icon: XCircle, label: labels.templates.cancelEvent},
-    {name: 'syncEventFromOris', icon: RefreshCw, label: labels.templates.syncEventFromOris},
     {name: 'registerForEvent', icon: UserPlus, label: labels.templates.registerForEvent},
     {name: 'unregisterFromEvent', icon: UserMinus, label: labels.templates.unregisterFromEvent},
 ];
@@ -95,6 +95,8 @@ const CoordinatorName = ({onNavigate}: { onNavigate: () => void }): ReactElement
 
 const CREATE_FORM_BASIC_FIELDS = ['name', 'eventDate', 'location', 'organizer', 'websiteUrl'];
 const CREATE_FORM_COORDINATION_FIELDS = ['coordinators', 'eventTypeId'];
+const CREATE_FORM_SI_POLICY_FIELDS = ['siUsage', 'siRentalAllowed'];
+const CREATE_FORM_SHARED_SERVICE_FIELDS = ['sharedTransportEnabled', 'sharedAccommodationEnabled'];
 
 export const EventsPage = (): ReactElement => {
     const {route, resourceData} = useHalPageData();
@@ -103,18 +105,15 @@ export const EventsPage = (): ReactElement => {
     const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [isBulkSyncModalOpen, setIsBulkSyncModalOpen] = useState(false);
     const [actionModal, setActionModal] = useState<EventActionModalState | null>(null);
-    const [newRegistrationState, setNewRegistrationState] = useState<{url: string; event: EventListData} | null>(null);
+    const [newRegistrationTarget, setNewRegistrationTarget] = useState<Link | null>(null);
     const {filterValue, extraParams, defaultSort, handleFilterChange} = useEventsFilterState();
-
-    const {data: newRegistrationData} = useAuthorizedQuery<Record<string, unknown>>(
-        newRegistrationState?.url ?? '',
-        {enabled: newRegistrationState !== null, staleTime: 0, gcTime: 0, retry: false},
-    );
 
     const importBatchTemplate = resourceData?._templates?.importEventsBatch;
     const importTemplate = resourceData?._templates?.importEvent;
     const activeImportTemplate = importBatchTemplate ?? importTemplate;
     const bulkSyncTemplate = resourceData?._templates?.syncAllUpcomingFromOris;
+    // `status` is returned to everyone; `_templates.createEvent` is present exactly for EVENTS:MANAGE.
+    const canManageEvents = Boolean(resourceData?._templates?.createEvent);
     const showRegisteredByMeToggle = Boolean(getUser()?.memberId);
 
     const orisImport = useOrisEventImport(
@@ -132,15 +131,16 @@ export const EventsPage = (): ReactElement => {
     const renderActionsCell = ({item}: TableCellRenderProps) => {
         const event = item as unknown as EventListData;
         const templates = event._templates;
-        const links = event._links as Record<string, {href: string}> | undefined;
-        const newRegLink = links?.['newRegistration'];
+        const links = event._links as Record<string, HalResourceLinks> | undefined;
+        const newRegLink = links?.['newRegistration'] ? asLinkArray(links['newRegistration'])[0] : undefined;
+        const syncLink = links?.sync ? asLinkArray(links.sync)[0] : undefined;
 
         return (
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                 {newRegLink && (
                     <Button key="newRegistration" variant={getActionVariant('newRegistration')} size="sm" title={labels.templates.registerForEvent} onClick={(e) => {
                         e.stopPropagation();
-                        setNewRegistrationState({url: newRegLink.href, event});
+                        setNewRegistrationTarget(newRegLink);
                     }}>
                         <UserPlus className="w-4 h-4"/>
                     </Button>
@@ -157,6 +157,7 @@ export const EventsPage = (): ReactElement => {
                         <Icon className="w-4 h-4"/>
                     </Button>
                 ))}
+                {syncLink && <SyncStatusIndicator syncLink={syncLink} mode="icon"/>}
             </div>
         );
     };
@@ -222,6 +223,25 @@ export const EventsPage = (): ReactElement => {
                                             {renderInput('categories')}
                                         </Section>
                                     )}
+                                    {hasFields(CREATE_FORM_SI_POLICY_FIELDS) && (
+                                        <Section title={labels.sections.siPolicy}>
+                                            <EventSiPolicyFields renderInput={renderInput} hasField={hasField}/>
+                                        </Section>
+                                    )}
+                                    {hasFields(CREATE_FORM_SHARED_SERVICE_FIELDS) && (
+                                        <Section title={labels.sections.sharedServices}>
+                                            {hasField('sharedTransportEnabled') && (
+                                                <DetailRow label={labels.fields.sharedTransportEnabled}>
+                                                    {renderInput('sharedTransportEnabled')}
+                                                </DetailRow>
+                                            )}
+                                            {hasField('sharedAccommodationEnabled') && (
+                                                <DetailRow label={labels.fields.sharedAccommodationEnabled}>
+                                                    {renderInput('sharedAccommodationEnabled')}
+                                                </DetailRow>
+                                            )}
+                                        </Section>
+                                    )}
                                     <div className="flex flex-wrap justify-end gap-3 pt-4 border-t border-border">
                                         {renderField('cancel')}
                                         {renderField('submit')}
@@ -253,7 +273,18 @@ export const EventsPage = (): ReactElement => {
             >
                 <TableCell sortable column={"eventDate"}
                            dataRender={({value}) => typeof value === 'string' ? formatDate(value) : ''}>{labels.tables.date}</TableCell>
-                <TableCell sortable column={"name"}>{labels.fields.name}</TableCell>
+                <TableCell sortable column={"name"}
+                           dataRender={({value, item}) => {
+                               const event = item as unknown as EventListData;
+                               if (event.status !== 'CANCELLED') return value as string;
+                               // Non-managers see no status column, so the state is repeated for screen readers.
+                               return (
+                                   <span className="line-through opacity-60">
+                                       {value as string}
+                                       <span className="sr-only"> — {getEnumLabel('eventStatus', 'CANCELLED')}</span>
+                                   </span>
+                               );
+                           }}>{labels.fields.name}</TableCell>
                 <TableCell sortable column={"location"}
                            dataRender={({value}) => (value as string | null) ?? null}>{labels.fields.location}</TableCell>
                 <TableCell sortable column={"organizer"}>{labels.fields.organizer}</TableCell>
@@ -312,14 +343,8 @@ export const EventsPage = (): ReactElement => {
                                return <CoordinatorCellContent coordinatorLinks={coordinatorLinks}/>;
                            }}>{labels.tables.coordinator}</TableCell>
                 <TableCell sortable column={"status"}
-                           dataRender={({value, item}) => {
-                               const label = typeof value === 'string' ? getEnumLabel('eventStatus', value) : '';
-                               const event = item as unknown as EventListData;
-                               if (event.status === 'CANCELLED' && event.cancellationReason) {
-                                   return <span title={event.cancellationReason}>{label}</span>;
-                               }
-                               return label;
-                           }}>{labels.tables.status}</TableCell>
+                           hidden={!canManageEvents}
+                           dataRender={({value}) => typeof value === 'string' ? getEnumLabel('eventStatus', value) : ''}>{labels.tables.status}</TableCell>
                 <TableCell column={"eventTypeId"}
                            dataRender={({item}) => {
                                const event = item as unknown as EventListData;
@@ -363,30 +388,10 @@ export const EventsPage = (): ReactElement => {
             </Modal>
         )}
 
-        {(() => {
-            if (!newRegistrationState || !newRegistrationData) return null;
-            const eventTemplates = newRegistrationState.event._templates as Record<string, HalFormsTemplate> | undefined;
-            const registerTemplate = eventTemplates?.registerForEvent;
-            if (!registerTemplate) return null;
-            // Submit must use the registerForEvent template (POST) from the event resource,
-            // not editRegistration (PUT) from the prefill defaults — the registration does
-            // not yet exist. resourceData carries the prefilled siCardNumber from defaults.
-            const registerTemplatePath = registerTemplate.target
-                ? normalizeKlabisApiPath(registerTemplate.target)
-                : route.pathname;
-            return (
-                <Modal isOpen={true} onClose={() => setNewRegistrationState(null)}
-                       title={labels.templates.registerForEvent} size="2xl">
-                    <HalFormDisplay
-                        template={registerTemplate}
-                        templateName="registerForEvent"
-                        resourceData={newRegistrationData}
-                        pathname={registerTemplatePath}
-                        onClose={() => setNewRegistrationState(null)}
-                        navigateOnSuccess={false}
-                    />
-                </Modal>
-            );
-        })()}
+        <EventRegistrationDialog
+            registration={newRegistrationTarget}
+            onClose={() => setNewRegistrationTarget(null)}
+            onRegistered={route.refetch}
+        />
     </div>;
 }

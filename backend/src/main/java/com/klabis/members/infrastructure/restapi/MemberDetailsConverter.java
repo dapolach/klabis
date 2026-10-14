@@ -2,7 +2,6 @@ package com.klabis.members.infrastructure.restapi;
 
 import com.klabis.common.mapping.MapstructSpringMapperConfig;
 import com.klabis.members.domain.Address;
-import com.klabis.members.domain.GuardianInformation;
 import com.klabis.members.domain.IdentityCard;
 import com.klabis.members.domain.Member;
 import com.klabis.members.domain.MedicalCourse;
@@ -37,7 +36,6 @@ interface MemberDetailsConverter extends Converter<Member, MemberDetailsResponse
     @Mapping(target = "id", expression = "java(member.getId().value())")
     @Mapping(target = "registrationNumber", source = "registrationNumber.value")
     @Mapping(target = "address", source = "address")
-    @Mapping(target = "guardian", source = "guardian")
     @Mapping(target = "email", expression = "java(member.getEmail() != null ? member.getEmail().value() : null)")
     @Mapping(target = "phone", expression = "java(member.getPhone() != null ? member.getPhone().value() : null)")
     @Mapping(target = "birthNumber", expression = "java(member.getBirthNumber() != null ? member.getBirthNumber().value() : null)")
@@ -46,6 +44,7 @@ interface MemberDetailsConverter extends Converter<Member, MemberDetailsResponse
     @Mapping(target = "gender", source = "gender")
     @Mapping(target = "drivingLicenseGroup", source = "drivingLicenseGroup")
     @Mapping(target = "suspensionReason", source = "suspensionReason")
+    @Mapping(target = "missingData", ignore = true)
     MemberDetailsResponse convert(Member member);
 
     AddressResponse addressToResponse(Address address);
@@ -53,19 +52,6 @@ interface MemberDetailsConverter extends Converter<Member, MemberDetailsResponse
     Gender genderToDto(com.klabis.members.domain.Gender gender);
 
     DrivingLicenseGroup drivingLicenseGroupToDto(com.klabis.members.domain.DrivingLicenseGroup drivingLicenseGroup);
-
-    default GuardianDTO guardianToResponse(GuardianInformation guardian) {
-        if (guardian == null) {
-            return null;
-        }
-        return GuardianDTOBuilder.builder()
-                .firstName(guardian.getFirstName())
-                .lastName(guardian.getLastName())
-                .relationship(guardian.getRelationship())
-                .email(guardian.getEmail().value())
-                .phone(guardian.getPhone().value())
-                .build();
-    }
 
     IdentityCardDto identityCardToDto(IdentityCard identityCard);
 

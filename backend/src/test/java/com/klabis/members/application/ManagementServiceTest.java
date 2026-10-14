@@ -18,7 +18,9 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.OptimisticLockingFailureException;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,13 +45,21 @@ class ManagementServiceTest {
     @Mock
     private MemberFinancialStatePort memberFinancialStatePort;
 
+    @Mock
+    private MemberOwnedGroupsPort memberOwnedGroupsPort;
+
+    @Mock
+    private MemberCompletenessPort memberCompletenessPort;
+
     private ManagementPort testedSubject;
     private UUID testMemberId;
     private Member testMember;
 
     @BeforeEach
     void setUp() {
-        testedSubject = new ManagementService(memberRepository, userService, eventPublisher, Optional.of(memberFinancialStatePort));
+        testedSubject = new ManagementService(memberRepository, userService, eventPublisher, Optional.of(memberFinancialStatePort), List.of(memberOwnedGroupsPort), memberCompletenessPort);
+        lenient().when(memberCompletenessPort.guardianContactsOf(any())).thenReturn(GuardianContacts.NONE);
+        lenient().when(memberCompletenessPort.missingData(any())).thenReturn(Set.of());
 
         testMemberId = UUID.randomUUID();
         testMember = MemberTestDataBuilder.aMember()
@@ -62,7 +72,6 @@ class ManagementServiceTest {
                 .withEmail("john.doe@example.com")
                 .withPhone("+420123456789")
                 .withAddress(Address.of("Hlavní 123", "Praha", "11000", "CZ"))
-                .withNoGuardian()
                 .build();
     }
 
@@ -143,7 +152,6 @@ class ManagementServiceTest {
                     .withEmail("jane.smith@example.com")
                     .withPhone("+420987654321")
                     .withAddress(Address.of("Vinohradská 456", "Praha", "12000", "CZ"))
-                    .withNoGuardian()
                     .build();
 
             // Default: no outstanding debt — only override in debt-specific tests
@@ -266,12 +274,9 @@ class ManagementServiceTest {
             @DisplayName("should throw SuspensionBlockedException when member is the sole owner of a group")
             void shouldThrowWhenMemberIsLastGroupOwner() {
                 when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(testActiveMember));
-                doAnswer(inv -> {
-                    MemberSuspensionRequestedEvent event = inv.getArgument(0);
-                    event.addBlockingGroup("group-id-1", "Trail Runners", "FREE");
-                    event.addBlockingGroup("group-id-2", "Juniors", "TRAINING");
-                    return null;
-                }).when(eventPublisher).publishEvent(any(MemberSuspensionRequestedEvent.class));
+                when(memberOwnedGroupsPort.findGroupsBlockingSuspension(new MemberId(testMemberId))).thenReturn(List.of(
+                        new OwnedGroup("group-id-1", "Trail Runners", "FREE"),
+                        new OwnedGroup("group-id-2", "Juniors", "TRAINING")));
 
                 var command = MemberSuspendMembershipBuilder.builder()
                         .suspendedBy(new UserId(adminUserId))
@@ -396,11 +401,8 @@ class ManagementServiceTest {
             @DisplayName("should report both blockers when member is last group owner AND has outstanding debt")
             void shouldReportBothBlockersWhenBothConditionsApply() {
                 when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(testActiveMember));
-                doAnswer(inv -> {
-                    MemberSuspensionRequestedEvent event = inv.getArgument(0);
-                    event.addBlockingGroup("group-id-1", "Trail Runners", "FREE");
-                    return null;
-                }).when(eventPublisher).publishEvent(any(MemberSuspensionRequestedEvent.class));
+                when(memberOwnedGroupsPort.findGroupsBlockingSuspension(new MemberId(testMemberId))).thenReturn(List.of(
+                        new OwnedGroup("group-id-1", "Trail Runners", "FREE")));
                 var snapshot = new MemberFinancialStatePort.MemberFinancialSnapshot(
                         new MemberId(testMemberId),
                         new MonetaryAmount(new BigDecimal("-250"), "CZK"),
@@ -445,7 +447,6 @@ class ManagementServiceTest {
                         .withEmail("bob.jones@example.com")
                         .withPhone("+420111222333")
                         .withAddress(Address.of("Řeznická 1", "Brno", "60200", "CZ"))
-                        .withNoGuardian()
                         .suspended(DeactivationReason.ODHLASKA, "Previous termination")
                         .build();
 
@@ -513,6 +514,65 @@ class ManagementServiceTest {
     }
 
     @Nested
+    @DisplayName("Sync Member From Oris Tests")
+    class SyncMemberFromOrisTests {
+
+        @Test
+        @DisplayName("should load, apply and save member on successful sync")
+        void shouldLoadApplyAndSaveOnSuccessfulSync() {
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(testMember));
+            when(memberRepository.save(any(Member.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            var command = MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(testMember.getRegistrationNumber())
+                    .firstName("Petr")
+                    .lastName("Svoboda")
+                    .dateOfBirth(java.time.LocalDate.of(1985, 3, 20))
+                    .gender(Gender.MALE)
+                    .nationality(new Nationality("SK"))
+                    .birthNumber(null)
+                    .email(EmailAddress.of("petr.svoboda@example.com"))
+                    .phone(PhoneNumber.of("+420999888777"))
+                    .address(Address.of("Nová 1", "Brno", "60200", "CZ"))
+                    .chipNumber("111")
+                    .build();
+
+            Member result = testedSubject.syncMemberFromOris(new MemberId(testMemberId), command);
+
+            assertThat(result.getFirstName()).isEqualTo("Petr");
+            assertThat(result.getLastName()).isEqualTo("Svoboda");
+            assertThat(result.getEmail()).isEqualTo(EmailAddress.of("petr.svoboda@example.com"));
+            verify(memberRepository).save(any(Member.class));
+        }
+
+        @Test
+        @DisplayName("should throw MemberNotFoundException for unknown member id")
+        void shouldThrowWhenMemberNotFound() {
+            UUID unknownId = UUID.randomUUID();
+            when(memberRepository.findById(new MemberId(unknownId))).thenReturn(Optional.empty());
+
+            var command = MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(testMember.getRegistrationNumber())
+                    .firstName("Petr")
+                    .lastName("Svoboda")
+                    .dateOfBirth(java.time.LocalDate.of(1985, 3, 20))
+                    .gender(Gender.MALE)
+                    .nationality(new Nationality("SK"))
+                    .birthNumber(null)
+                    .email(EmailAddress.of("petr.svoboda@example.com"))
+                    .phone(PhoneNumber.of("+420999888777"))
+                    .address(Address.of("Nová 1", "Brno", "60200", "CZ"))
+                    .chipNumber("111")
+                    .build();
+
+            assertThatThrownBy(() -> testedSubject.syncMemberFromOris(new MemberId(unknownId), command))
+                    .isInstanceOf(MemberNotFoundException.class);
+
+            verify(memberRepository, never()).save(any(Member.class));
+        }
+    }
+
+    @Nested
     @DisplayName("Get Member And Record View Tests")
     class GetMemberAndRecordViewTests {
 
@@ -529,7 +589,7 @@ class ManagementServiceTest {
             Member activeMember = MemberTestDataBuilder.aMember().withId(testMemberId).withActive(true).build();
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(activeMember));
 
-            Member result = testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), false);
+            Member result = testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(false, false));
 
             assertThat(result.isActive()).isTrue();
         }
@@ -540,7 +600,7 @@ class ManagementServiceTest {
             Member inactiveMember = MemberTestDataBuilder.aMember().withId(testMemberId).withActive(false).build();
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(inactiveMember));
 
-            assertThatThrownBy(() -> testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), false))
+            assertThatThrownBy(() -> testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(false, false)))
                     .isInstanceOf(MemberNotFoundException.class);
 
             verify(memberRepository, never()).save(any(Member.class));
@@ -552,7 +612,7 @@ class ManagementServiceTest {
             Member inactiveMember = MemberTestDataBuilder.aMember().withId(testMemberId).withActive(false).build();
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(inactiveMember));
 
-            Member result = testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), true);
+            Member result = testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(true, true));
 
             assertThat(result.isActive()).isFalse();
         }
@@ -562,7 +622,7 @@ class ManagementServiceTest {
         void shouldThrowWhenMemberNotFound() {
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.empty());
 
-            assertThatThrownBy(() -> testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), false))
+            assertThatThrownBy(() -> testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(false, false)))
                     .isInstanceOf(MemberNotFoundException.class);
         }
 
@@ -576,9 +636,55 @@ class ManagementServiceTest {
                     .build();
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(memberWithBirthNumber));
 
-            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), true);
+            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(true, true));
 
             verify(eventPublisher).publishEvent(any(BirthNumberAccessedEvent.class));
+        }
+
+        @Test
+        @DisplayName("should return inactive member for a holder of profile editing over it")
+        void shouldReturnInactiveMemberWhenSuspendedMembersAreVisible() {
+            Member inactiveMember = MemberTestDataBuilder.aMember().withId(testMemberId).withActive(false).build();
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(inactiveMember));
+
+            Member result = testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId),
+                    new MemberViewAccess(true, true));
+
+            assertThat(result.isActive()).isFalse();
+        }
+
+        @Test
+        @DisplayName("should publish BirthNumberAccessedEvent for a viewer who sees the birth number without managing members")
+        void shouldPublishBirthNumberAccessedEventForHolderOfProfileEditing() {
+            Member memberWithBirthNumber = MemberTestDataBuilder.aMember()
+                    .withId(testMemberId)
+                    .withNationality("CZ")
+                    .withBirthNumber("900101/1234")
+                    .build();
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(memberWithBirthNumber));
+
+            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId),
+                    new MemberViewAccess(true, true));
+
+            ArgumentCaptor<BirthNumberAccessedEvent> event = ArgumentCaptor.forClass(BirthNumberAccessedEvent.class);
+            verify(eventPublisher).publishEvent(event.capture());
+            assertThat(event.getValue().memberId()).isEqualTo(new MemberId(testMemberId));
+        }
+
+        @Test
+        @DisplayName("should not publish BirthNumberAccessedEvent when the viewer does not see the birth number")
+        void shouldNotPublishEventWhenBirthNumberIsNotVisible() {
+            Member memberWithBirthNumber = MemberTestDataBuilder.aMember()
+                    .withId(testMemberId)
+                    .withNationality("CZ")
+                    .withBirthNumber("900101/1234")
+                    .build();
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(memberWithBirthNumber));
+
+            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId),
+                    new MemberViewAccess(false, false));
+
+            verify(eventPublisher, never()).publishEvent(any(BirthNumberAccessedEvent.class));
         }
 
         @Test
@@ -590,9 +696,39 @@ class ManagementServiceTest {
                     .build();
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(memberWithoutBirthNumber));
 
-            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), true);
+            testedSubject.getMemberAndRecordView(new MemberId(testMemberId), new UserId(viewerUserId), new MemberViewAccess(true, true));
 
             verify(eventPublisher, never()).publishEvent(any(BirthNumberAccessedEvent.class));
+        }
+    }
+
+    @Nested
+    @DisplayName("Get Member Tests")
+    class GetMemberTests {
+
+        @Test
+        @DisplayName("should return member without publishing BirthNumberAccessedEvent even when member has a birth number")
+        void shouldReturnMemberWithoutPublishingAuditEvent() {
+            Member memberWithBirthNumber = MemberTestDataBuilder.aMember()
+                    .withId(testMemberId)
+                    .withNationality("CZ")
+                    .withBirthNumber("900101/1234")
+                    .build();
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(memberWithBirthNumber));
+
+            Member result = testedSubject.getMember(new MemberId(testMemberId));
+
+            assertThat(result.getId().uuid()).isEqualTo(testMemberId);
+            verify(eventPublisher, never()).publishEvent(any(BirthNumberAccessedEvent.class));
+        }
+
+        @Test
+        @DisplayName("should throw MemberNotFoundException when member does not exist")
+        void shouldThrowWhenMemberNotFound() {
+            when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.empty());
+
+            assertThatThrownBy(() -> testedSubject.getMember(new MemberId(testMemberId)))
+                    .isInstanceOf(MemberNotFoundException.class);
         }
     }
 
@@ -615,7 +751,6 @@ class ManagementServiceTest {
                     .withEmail("jane.smith@example.com")
                     .withPhone("+420987654321")
                     .withAddress(Address.of("Reakční 10", "Brno", "60200", "CZ"))
-                    .withNoGuardian()
                     .suspended(DeactivationReason.ODHLASKA, "Previous termination")
                     .build();
         }
@@ -644,7 +779,6 @@ class ManagementServiceTest {
                     .withEmail("bob.jones@example.com")
                     .withPhone("+420111222333")
                     .withAddress(Address.of("Řeznická 1", "Brno", "60200", "CZ"))
-                    .withNoGuardian()
                     .build();
 
             when(memberRepository.findById(new MemberId(testMemberId))).thenReturn(Optional.of(activeMember));
@@ -694,6 +828,30 @@ class ManagementServiceTest {
             assertThat(resumeEvent.memberId()).isEqualTo(new MemberId(testMemberId));
             assertThat(resumeEvent.resumedBy()).isEqualTo(new UserId(adminUserId));
             assertThat(resumeEvent.registrationNumber()).isEqualTo(testSuspendedMember.getRegistrationNumber());
+        }
+    }
+
+    @Nested
+    @DisplayName("member listing")
+    class ListMembersTests {
+
+        @Test
+        @DisplayName("listMembers should delegate filter and pageable to repository")
+        void shouldDelegateListMembersToRepository() {
+            var filter = MemberFilter.activeOnly();
+            var pageable = org.springframework.data.domain.PageRequest.of(0, 5);
+            var page = new org.springframework.data.domain.PageImpl<>(List.of(testMember));
+            when(memberRepository.findAll(filter, pageable)).thenReturn(page);
+
+            assertThat(testedSubject.listMembers(filter, pageable)).isSameAs(page);
+        }
+
+        @Test
+        @DisplayName("listActiveMembers should return only active-filter results")
+        void shouldListActiveMembers() {
+            when(memberRepository.findAll(MemberFilter.activeOnly())).thenReturn(List.of(testMember));
+
+            assertThat(testedSubject.listActiveMembers()).containsExactly(testMember);
         }
     }
 }

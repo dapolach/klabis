@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import {render, screen, fireEvent} from '@testing-library/react';
+import {fireEvent, render, screen} from '@testing-library/react';
 import {MemoryRouter, useLocation} from 'react-router-dom';
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import {useHalPageData} from '../../hooks/useHalPageData';
@@ -172,6 +172,35 @@ describe('MembersPage', () => {
         };
         renderPage(createMockPageData(resourceData));
         expect(screen.queryByTestId('form-template-button-registerMember')).not.toBeInTheDocument();
+    });
+
+    it('renders "Synchronizovat s ORIS" button when importFromOris template is present', () => {
+        const resourceData: HalResponse = {
+            _links: {self: {href: '/api/members'}},
+            _templates: {
+                default: mockHalFormsTemplate({title: 'Get Members', method: 'PATCH'}),
+                importFromOris: mockHalFormsTemplate({
+                    title: 'Synchronizovat s ORIS',
+                    method: 'POST',
+                    target: 'http://localhost/api/members/oris-import',
+                    properties: [],
+                }),
+            },
+        };
+        renderPage(createMockPageData(resourceData));
+        expect(screen.getByTestId('form-template-button-importFromOris')).toBeInTheDocument();
+        expect(screen.getByText('Synchronizovat s ORIS')).toBeInTheDocument();
+    });
+
+    it('does NOT render "Synchronizovat s ORIS" button when importFromOris template is absent', () => {
+        const resourceData: HalResponse = {
+            _links: {self: {href: '/api/members'}},
+            _templates: {
+                default: mockHalFormsTemplate({title: 'Get Members', method: 'PATCH'}),
+            },
+        };
+        renderPage(createMockPageData(resourceData));
+        expect(screen.queryByTestId('form-template-button-importFromOris')).not.toBeInTheDocument();
     });
 
     it('renders basic table columns: Registrační číslo, Příjmení, Jméno', () => {
@@ -400,6 +429,79 @@ describe('MembersPage — filter bar integration', () => {
         await user.click(screen.getByRole('button', {name: labels.membersFilter.statusAll}));
         expect(screen.getByTestId('search-string')).toHaveTextContent('status=ALL');
     });
+
+    it('clicking "Jen neúplní" updates the URL to ?incomplete=true when hasManageAuthority is true', async () => {
+        const user = userEvent.setup();
+        const resourceData: HalResponse = {
+            _links: {self: {href: '/api/members'}},
+            _templates: {
+                default: mockHalFormsTemplate({title: 'Get Members', method: 'PATCH'}),
+                registerMember: mockHalFormsTemplate({title: 'Registrovat člena', method: 'POST'}),
+            },
+        };
+        vi.mocked(useAuthorizedQuery).mockReturnValue({data: resourceData, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>);
+        const pageData = createMockPageData(resourceData);
+        renderPageWithSearchReader('/members?status=ACTIVE', pageData);
+
+        await user.click(screen.getByRole('checkbox', {name: labels.membersFilter.incompleteOnly}));
+        expect(screen.getByTestId('search-string')).toHaveTextContent('incomplete=true');
+    });
+
+    it('does NOT render the "Jen neúplní" toggle when hasManageAuthority is false', () => {
+        const resourceData: HalResponse = {
+            _links: {self: {href: '/api/members'}},
+        };
+        vi.mocked(useAuthorizedQuery).mockReturnValue({data: resourceData, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>);
+        const pageData = createMockPageData(resourceData);
+        renderPageWithSearchReader('/members?status=ACTIVE', pageData);
+
+        expect(screen.queryByRole('checkbox', {name: labels.membersFilter.incompleteOnly})).not.toBeInTheDocument();
+    });
+});
+
+describe('MembersPage — data-incomplete badge', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('shows badge on incomplete row and not on complete row, when hasManageAuthority is true', () => {
+        const resourceData: HalResponse = {
+            _links: {self: {href: 'http://localhost/api/members'}},
+            _templates: {
+                default: mockHalFormsTemplate({title: 'Get Members', method: 'PATCH'}),
+                registerMember: mockHalFormsTemplate({title: 'Registrovat člena', method: 'POST'}),
+            },
+            _embedded: {
+                memberSummaryResponseList: [
+                    buildMemberRow({id: 'm1', registrationNumber: 'REG-001', dataIncomplete: true}),
+                    buildMemberRow({id: 'm2', registrationNumber: 'REG-002', dataIncomplete: false}),
+                ],
+            },
+            page: {size: 10, totalElements: 2, totalPages: 1, number: 0},
+        };
+        vi.mocked(useAuthorizedQuery).mockReturnValue({data: resourceData, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>);
+        renderPage(createMockPageData(resourceData));
+
+        const badges = screen.getAllByText(labels.membersFilter.incompleteBadge)
+            .filter((el) => el.tagName !== 'TH');
+        expect(badges).toHaveLength(1);
+    });
+
+    it('does NOT show the badge column when hasManageAuthority is false (field absent)', () => {
+        const resourceData: HalResponse = {
+            _links: {self: {href: 'http://localhost/api/members'}},
+            _embedded: {
+                memberSummaryResponseList: [
+                    buildMemberRow({id: 'm1', registrationNumber: 'REG-001'}),
+                ],
+            },
+            page: {size: 10, totalElements: 1, totalPages: 1, number: 0},
+        };
+        vi.mocked(useAuthorizedQuery).mockReturnValue({data: resourceData, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>);
+        renderPage(createMockPageData(resourceData));
+
+        expect(screen.queryByText(labels.membersFilter.incompleteBadge)).not.toBeInTheDocument();
+    });
 });
 
 describe('MembersPage — Banknote (finance transaction) action', () => {
@@ -471,5 +573,31 @@ describe('MembersPage — Banknote (finance transaction) action', () => {
         });
         renderPageWithMembers([member]);
         expect(screen.queryByRole('button', {name: labels.finance.openMemberAccount})).not.toBeInTheDocument();
+    });
+});
+
+describe('MembersPage — sync status indicator in actions cell (4.3)', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+    });
+
+    it('renders SyncStatusIndicator in the actions cell when row has _links.sync', () => {
+        const member = buildMemberRow({
+            _links: {
+                self: {href: '/api/members/member-1'},
+                sync: {href: '/api/members/member-1/sync'},
+            },
+        });
+        renderPageWithMembers([member]);
+        // Behavioural coverage of SyncStatusIndicator lives in SyncStatusIndicator.test.tsx;
+        // here we only assert the indicator is mounted when the sync link is present.
+        expect(screen.getByTestId('sync-error')).toBeInTheDocument();
+    });
+
+    it('does not render a sync indicator when row has no _links.sync', () => {
+        renderPageWithMembers([buildMemberRow()]);
+        expect(screen.queryByTestId('sync-error')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('sync-loading')).not.toBeInTheDocument();
+        expect(screen.queryByTestId(/^sync-status-/)).not.toBeInTheDocument();
     });
 });

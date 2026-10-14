@@ -10,6 +10,7 @@ import {HalFormsCheckboxGroup, HalFormsInput, HalFormsMemberId, HalFormsSelect} 
 import {DetailRow} from "./UI";
 import {FormGroupWrapper} from "./FormGroupWrapper";
 import {getFieldLabel} from "../localization";
+import {LegalGuardianInputField} from "./legal-guardians/LegalGuardianInputField";
 import {useEventTypes} from "../hooks/useEventTypes";
 import {useMembershipFeeTierOptions} from "../hooks/useMembershipFeeTierOptions";
 
@@ -48,14 +49,6 @@ const ADDRESS_FIELDS: SubField[] = [
 const IDENTITY_CARD_FIELDS: SubField[] = [
     {key: "cardNumber", attr: "cardNumber", prompt: "Číslo OP"},
     {key: "validityDate", attr: "validityDate", prompt: "Platnost OP", type: "date"},
-];
-
-const GUARDIAN_FIELDS: SubField[] = [
-    {key: "firstName", attr: "firstName", prompt: "Jméno"},
-    {key: "lastName", attr: "lastName", prompt: "Příjmení"},
-    {key: "relationship", attr: "relationship", prompt: "Vztah"},
-    {key: "email", attr: "email", prompt: "E-mail", type: "email"},
-    {key: "phone", attr: "phone", prompt: "Telefon", type: "tel"},
 ];
 
 const AGE_RANGE_FIELDS: SubField[] = [
@@ -171,80 +164,42 @@ const changeTypeOfProperty = (prop: HalFormsInputProps, newType: string): HalFor
 }
 
 /**
- * Renders a single MemberId/UUID field — read/write dropdown or, when readOnly,
- * the resolved member name. Used both for a standalone field and as the per-row
- * renderer when the property is multi: the base factory's `multi` branch always
- * routes the array to HalFormsCollectionField first (D2), which recurses back here
- * per row with multiple:false — so this never needs to special-case collections itself.
+ * Field types whose value identifies a person and therefore renders as the member picker.
+ * "MemberId" is a club member; "UserId" is any user of the system (a family group parent need not
+ * have a member profile) — both get their options from listMemberOptions today, since user and
+ * member identities share one UUID.
+ */
+const MEMBER_PICKER_FIELD_TYPES = ['MemberId', 'UserId'];
+
+const isMemberPickerFieldType = (fieldType: string): boolean => MEMBER_PICKER_FIELD_TYPES.includes(fieldType);
+
+/**
+ * Renders a single member/user picker field — read/write dropdown or, when readOnly, the resolved
+ * member name. Used both for a standalone field and as the per-row renderer when the
+ * property is multi: the base factory's `multi` branch detects that this widget exists for
+ * the field type and routes the array through HalFormsCollectionField (D7), which recurses back
+ * here per row with multiple:false — so this never needs to special-case collections itself.
+ *
+ * Only the explicit "MemberId"/"UserId" field type hint triggers the picker (D7) — a plain "UUID"
+ * field is NOT assumed to be a person reference (it renders by its options/basic type
+ * instead), since that assumption is exactly what caused multi UUID fields with link options
+ * (coordinators, disciplineIds) to silently render as a single select.
  */
 const memberIdFieldRenderer = (conf: HalFormsInputProps, extraProps?: {excludeIds?: string[]; includeIds?: string[]}): ReactElement => {
-    // If backend already provides inline options, respect them instead of defaulting to members list
+    // If backend already provides inline options, respect them instead of the member picker
     if (conf.prop.options?.inline) {
         return <HalFormsSelect {...conf} />;
     }
-    const propWithMemberOptions = {
-        ...conf.prop,
-        options: {
-            link: {
-                href: "/members/options"
-            }
-        }
-    };
-    return <HalFormsMemberId {...conf} prop={propWithMemberOptions} {...extraProps}/>;
+    // Backend always provides options.link for member-picker fields; trust it as-is.
+    return <HalFormsMemberId {...conf} {...extraProps}/>;
 };
 
 export const klabisCustomFieldFactory: CustomFieldFactory = (fieldType: string, conf: HalFormsInputProps): ReactElement | null => {
     switch (fieldType) {
         case "range": return <HalFormsInput {...changeTypeOfProperty(conf, 'text')}/>;
         case "MemberId":
-        case "UUID": {
+        case "UserId": {
             return memberIdFieldRenderer(conf);
-        }
-        case "Gender": {
-            const propWithGenderOptions = {
-                ...conf.prop,
-                options: {
-                    inline: [
-                        {value: "MALE", prompt: "Muž"},
-                        {value: "FEMALE", prompt: "Žena"},
-                    ]
-                }
-            };
-            return <HalFormsSelect {...conf} prop={propWithGenderOptions}/>;
-        }
-        case "DrivingLicenseGroup": {
-            const propWithDrivingOptions = {
-                ...conf.prop,
-                options: {
-                    inline: [
-                        {value: "AM", prompt: "AM"},
-                        {value: "A1", prompt: "A1"},
-                        {value: "A2", prompt: "A2"},
-                        {value: "A", prompt: "A"},
-                        {value: "B", prompt: "B"},
-                        {value: "BE", prompt: "BE"},
-                        {value: "C", prompt: "C"},
-                        {value: "C1", prompt: "C1"},
-                        {value: "D", prompt: "D"},
-                        {value: "D1", prompt: "D1"},
-                        {value: "T", prompt: "T"},
-                    ]
-                }
-            };
-            return <HalFormsSelect {...conf} prop={propWithDrivingOptions}/>;
-        }
-        case "DeactivationReason": {
-            const propWithDeactivationOptions = {
-                ...conf.prop,
-                options: {
-                    inline: [
-                        {value: "ODHLASKA", prompt: "Odhlášení"},
-                        {value: "PRESTUP", prompt: "Přestup"},
-                        {value: "OTHER", prompt: "Jiný důvod"},
-                    ]
-                }
-            };
-            return <HalFormsSelect {...conf} prop={propWithDeactivationOptions}/>;
         }
         case "RankingRequest":
             return renderCompositeField(conf, [
@@ -254,6 +209,9 @@ export const klabisCustomFieldFactory: CustomFieldFactory = (fieldType: string, 
             ]);
         case "MembershipFeeTierMultiSelect":
             return <MembershipFeeTierMultiSelectField {...conf}/>;
+        case "LegalGuardianInputRequest":
+            if (isMultipleProperty(conf.prop)) return null;
+            return <LegalGuardianInputField {...conf}/>;
         case "PaymentRuleRequest":
             // For multi/collection: return null so HalFormsCollectionField handles iteration.
             // For a single item (inside the collection): render sub-fields with custom select renderers.
@@ -268,8 +226,6 @@ export const klabisCustomFieldFactory: CustomFieldFactory = (fieldType: string, 
             return renderCompositeField(conf, ADDRESS_FIELDS);
         case "AgeRangeRequest":
             return renderCompositeField(conf, AGE_RANGE_FIELDS);
-        case "GuardianDTO":
-            return renderCompositeField(conf, GUARDIAN_FIELDS);
         case "IdentityCardDto":
             return renderCompositeField(conf, IDENTITY_CARD_FIELDS);
         case "MedicalCourseDto":
@@ -288,7 +244,9 @@ export const klabisFieldsFactory = expandHalFormsFieldFactory(klabisCustomFieldF
 /**
  * Creates a variant of klabisFieldsFactory that applies member-ID filtering.
  * Use when the caller already holds the group's current member/owner list and wants
- * to prevent the user from picking someone already in the group.
+ * to prevent the user from picking someone already in the group. Both picker field types
+ * are filtered — a parent is identified by user id, a child by member id, and the two
+ * share one UUID, so the same already-in-group list covers both.
  *
  * @param excludeIds - IDs to hide from the picker (already-in-group members)
  * @param includeIds - When set, only these IDs are shown (whitelist for promote-to-owner)
@@ -301,7 +259,7 @@ export const createMemberFilteredFactory = (
     if (!hasFilter) return klabisFieldsFactory;
 
     return expandHalFormsFieldFactory((fieldType: string, conf: HalFormsInputProps): ReactElement | null => {
-        if (fieldType === 'MemberId' || fieldType === 'UUID') {
+        if (isMemberPickerFieldType(fieldType)) {
             return memberIdFieldRenderer(conf, {excludeIds, includeIds});
         }
         return null;

@@ -2,7 +2,7 @@
 name: klabis-api-spec
 description: Authoring the hand-written OpenAPI spec in docs/openapi/spec/ — x-klabis-* field-security and x-hal-* hypermedia extensions, module layout, and the spec-first workflow. Use whenever adding, changing or removing a REST endpoint, request/response field, HAL link or HAL+FORMS template; when writing the API chapter of an OpenSpec design.md; or when migrating a module from code-first to spec-first.
 user-invocable: false
-version: 0.8.0
+version: 0.9.0
 ---
 
 # Klabis API Spec
@@ -33,7 +33,7 @@ differ enough between them that generalising from one to another produces broken
 | Working on | Read |
 |---|---|
 | Any response: media types, the derived HAL envelope, `_embedded` keys, `x-hal-entity-items`/`x-hal-embedded`, `x-hal-links`/`x-hal-templates` | `references/hypermedia.md` |
-| Hiding/masking a response field, authorizing a request field, endpoint authorization (`x-klabis-authority`, `x-klabis-owner-visible`) | `references/field-security.md` |
+| Hiding/masking a response field, authorizing a request field, endpoint authorization (`x-klabis-authority`, `x-klabis-target-id`, `x-klabis-owner-visible`, `x-klabis-read-authority`) | `references/field-security.md` |
 | Constraints on request fields, cross-field rules | `references/validation.md` |
 | A PATCH endpoint (the `JsonNullable<T>` tri-state) | `references/patch-bodies.md` |
 | Registering a new module for codegen, or migrating one to spec-first | `references/adding-a-module.md` |
@@ -155,6 +155,21 @@ annotations: `OpenApiConfig` (global info + security scheme), `MvcExceptionHandl
 `GroupsExceptionHandler`, the hand-written `MemberOptionResponse`/`MemberSummaryResponse`, and
 `@Hidden` on `ActingUser`/`ActingMember`.
 
+## Injecting the acting user into a controller method
+
+An endpoint that needs the authenticated caller declares the parameter via `x-spring-provide-args`
+on the operation — a verbatim Java parameter declaration, so annotation and type must be
+fully-qualified (the template adds no imports):
+
+```yaml
+x-spring-provide-args:
+  - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+```
+
+Two flavours: `@ActingUser` + `CurrentUserData`
+for any authenticated user, `@ActingMember` + `MemberId` to require a member profile
+(fails with `MemberProfileRequiredException` otherwise).
+
 ## Anti-patterns
 
 - Editing generated output: `build/generated/**`, `docs/openapi/klabis-full.json`,
@@ -214,8 +229,9 @@ annotations: `OpenApiConfig` (global info + security scheme), `MvcExceptionHandl
 - Concluding an endpoint needs no authority because the controller has no annotation — check the
   method body for an imperative `checkXxxAccess()` first
 - Relaxing an assertion in a link/affordance unit test that started failing after authorization moved
-  into the spec — the test was passing only because `HalFormsSupport.INSTANCE` was null; wire it a
-  real `OwnershipResolver` instead
+  into the spec — the test was passing only because `HalFormsSupport.INSTANCE` was null; test it
+  through a `@WebMvcTest` slice with `@WithKlabisMockUser` (or `SecurityContextAuthorizationEvaluator`)
+  instead
 - Writing `@HasAuthority` on a controller method — the authority belongs in `x-klabis-authority`,
   stated once
 - Writing `@Operation` / `@ApiResponse` / `@Parameter` on a controller — the generator emits them
@@ -233,16 +249,24 @@ annotations: `OpenApiConfig` (global info + security scheme), `MvcExceptionHandl
 - Reaching for a raw `x-field-extra-annotation` on a schema property to inject an annotation. The
   generator only honours it on *parameters*; on a model property the overridden `pojo.mustache`
   decides, and an unlisted extension is silently dropped — so the annotation never appears and any
-  standard keyword you removed to "replace" is lost too.
+  standard keyword you removed to "replace" is lost too. For a HAL-FORMS input type there is a
+  dedicated key now: `x-hal-input-type` (assembled into the single `@HalForms` together with
+  `x-klabis-halforms-access`). A `@HalForms(...)` inside `x-field-extra-annotation` is a
+  `validate.mjs` error — it would duplicate the assembled annotation, and `@HalForms` is not
+  `@Repeatable`.
 - Naming a fresh top-level `enum:` schema and listing it in `models` — the generator writes a
   well-formed Java file with no constants and no body, and every reference fails to compile. An
   enum only works when `schemaMappings` points it at an existing domain enum. With no such enum,
   use `type: string`; the domain's own `valueOf`/`switch` still rejects bad values.
+  A request property typed with an enum (generated inline or via `schemaMappings`) gets HAL-FORMS
+  options automatically (ADR-007) — option order is the Java enum's declaration order, so order the
+  spec `enum:` list the way the UI should offer it. Add `x-hal-input-type: <EnumName>` so the
+  frontend picks the right translation group.
 - Stripping `@RequestBody` off a generated-interface override because the interface already
   declares it. `HalFormsSupport` looks for it on the *concrete* method resolved via
   `methodOn(Controller.class)`, and Java does not inherit parameter annotations across an
   interface boundary — unlike `@HasAuthority`, nothing bridges this. Binding and authorization
-  still work, so it compiles and passes; the inline options from `klabisAffordWith*Options`
+  still work, so it compiles and passes; explicit options from `klabisAffordWithOptions`
   silently vanish from `_templates` while `properties[]` and `target` stay correct.
 - Gating a `RepresentationModelProcessor<CollectionModel<EntityModel<X>>>` on a request attribute
   *for fear of cross-contamination*. Spring HATEOAS's `RepresentationModelProcessorInvoker` resolves
@@ -252,10 +276,12 @@ annotations: `OpenApiConfig` (global info + security scheme), `MvcExceptionHandl
   cannot carry: `EventRegistrationController.RegistrationListPostprocessor` reads `eventId` from a
   request attribute because an *empty* registration list has no item to recover it from, which is a
   different problem from type dispatch.
-- Injecting a new port into an `@MvcComponent` postprocessor — the scan is global, not scoped to a
-  slice's `controllers=`, so every unrelated `@WebMvcTest` breaks unless `WithPostprocessors` also
-  mocks it. Compute port-derived data in the controller, which already holds the port, and pass it
-  through a request attribute.
+- Injecting a new port into an `@MvcComponent` postprocessor **without** adding it to
+  the owning module's `*WebMvcMockitoBeans`. The scan is global, so every
+  unrelated `@WebMvcTest` fails to start. Injecting the port is the right design (the postprocessor
+  owns the affordance logic — e.g. `SyncStatePostprocessor` → `SynchronizationPort`); passing
+  port-derived data from the controller through a request attribute is the old workaround, don't
+  reintroduce it. Slice tests stub the shared mock via `@Autowired`.
 - Putting `x-klabis-authority` / `x-klabis-owner-visible` on a property that uses `oneOf` or
   `allOf`. Composition strips property-level vendor extensions, and `allOf` additionally yields a
   bare type rather than `JsonNullable<T>` — which `RequestBodyFieldAuthorizationAdvice` skips, so
@@ -275,12 +301,19 @@ annotations: `OpenApiConfig` (global info + security scheme), `MvcExceptionHandl
   No hand-written controller hits this, so it first appears when a module goes spec-first.
 - Writing `nullable: true` on a PATCH property. It is the OpenAPI 3.0 keyword and these specs are
   3.1, so it is silently ignored: no `JsonNullable`, no warning, and the endpoint quietly loses the
-  ability to distinguish "absent" from "clear this field". Use `type: [x, 'null']`.
+  ability to distinguish "absent" from "clear this field". Use `type: [x, 'null']`, or — on a `$ref`
+  property — `$ref` + `x-klabis-nullable: true`.
+- Writing a nullable `$ref` PATCH property as `oneOf: [{$ref}, {type: 'null'}]`. That was the only
+  spelling before `x-klabis-nullable` existed and every such property was migrated off it: the
+  composition strips sibling vendor extensions, so the property can carry neither
+  `x-klabis-authority` nor `x-hal-input-type`. `$ref` + `x-klabis-nullable: true` generates the same
+  wrapper with no composition, and the bundle emits the identical `oneOf` shape either way.
 - Writing a PATCH property with `oneOf` or `allOf` when it also carries `x-klabis-authority` or
   `x-klabis-owner-visible`. `oneOf` strips the extension (scalar ones included); `allOf` keeps it
   but generates a bare type, and `RequestBodyFieldAuthorizationAdvice` skips every component that is
   not `JsonNullable`, so the annotation is never evaluated. Either way the check silently stops
-  running for the one caller it exists for — the owner. Inline the type and map
+  running for the one caller it exists for — the owner. On a nullable `$ref` property the way out is
+  `$ref` + `x-klabis-nullable: true` (no composition at all); otherwise inline the type and map
   `<Parent>_<property>` in `schemaMappings`; see the `gender` section above.
 - Marking a response property or a POST/PUT body property nullable. There is no tri-state to express
   and the `JsonNullable` wrapper leaks into code that only ever wants a value.

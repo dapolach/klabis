@@ -1,7 +1,8 @@
 package com.klabis.events.infrastructure.restapi;
 
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.mvc.MvcComponent;
-import com.klabis.common.ui.HalFormsInlineOption;
+import com.klabis.common.ui.HalFormsOptionsDef;
 import com.klabis.common.ui.HalResponseContext;
 import com.klabis.common.ui.ModelWithDomainPostprocessor;
 import com.klabis.common.ui.RootModel;
@@ -10,7 +11,6 @@ import com.klabis.events.EventTypeId;
 import com.klabis.events.application.EventTypeManagementPort;
 import com.klabis.events.domain.EventType;
 import org.jmolecules.architecture.hexagonal.PrimaryAdapter;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.hateoas.CollectionModel;
 import org.springframework.hateoas.EntityModel;
@@ -20,8 +20,6 @@ import org.springframework.hateoas.MediaTypes;
 import org.springframework.hateoas.server.ExposesResourceFor;
 import org.springframework.hateoas.server.RepresentationModelProcessor;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -103,22 +101,15 @@ public class EventTypeController implements EventTypesApi {
 @MvcComponent
 class EventTypeDetailsPostprocessor extends ModelWithDomainPostprocessor<EventTypeDto, EventType> {
 
-    private final ObjectProvider<EventTypeManagementPort> portProvider;
-
-    EventTypeDetailsPostprocessor(ObjectProvider<EventTypeManagementPort> portProvider) {
-        this.portProvider = portProvider;
-    }
-
     @Override
     public void process(EntityModel<EventTypeDto> dtoModel, EventType eventType) {
         UUID id = eventType.getId().value();
-        EventTypeManagementPort port = portProvider.getIfAvailable();
-        List<HalFormsInlineOption> disciplineOptions = port != null ? port.listDisciplineOptions() : List.of();
         klabisLinkTo(methodOn(EventTypesApi.class).getEventType(id)).ifPresent(link ->
                 dtoModel.add(link.withSelfRel()
-                        .andAffordances(klabisAffordWithPromptedOptions(
+                        .andAffordances(klabisAffordWithOptions(
                                 methodOn(EventTypesApi.class).updateEventType(id, null),
-                                Map.of("orisDisciplineIds", disciplineOptions)))
+                                Map.of("disciplineIds", HalFormsOptionsDef.remote(
+                                        methodOn(DisciplinesApi.class).listDisciplineOptions()))))
                         .andAffordances(klabisAfford(methodOn(EventTypesApi.class).deleteEventType(id)))));
         klabisLinkTo(methodOn(EventTypesApi.class).listEventTypes())
                 .ifPresent(link -> dtoModel.add(link.withRel("collection")));
@@ -128,28 +119,20 @@ class EventTypeDetailsPostprocessor extends ModelWithDomainPostprocessor<EventTy
 /**
  * Adds the collection-level create affordance. The self link itself is built by
  * {@code HalResponseBodyAdvice} from the current request, so this processor only contributes the
- * affordance — which stays authorization-sensitive via {@code klabisAffordWithPromptedOptions}.
+ * affordance — which stays authorization-sensitive via {@code klabisAffordWithOptions}.
  */
 @MvcComponent
 class EventTypeListPostprocessor
         implements RepresentationModelProcessor<CollectionModel<EntityModel<EventTypeDto>>> {
 
-    private final ObjectProvider<EventTypeManagementPort> portProvider;
-
-    EventTypeListPostprocessor(ObjectProvider<EventTypeManagementPort> portProvider) {
-        this.portProvider = portProvider;
-    }
-
     @Override
     public CollectionModel<EntityModel<EventTypeDto>> process(
             CollectionModel<EntityModel<EventTypeDto>> model) {
-        EventTypeManagementPort port = portProvider.getIfAvailable();
-        List<HalFormsInlineOption> disciplineOptions = port != null ? port.listDisciplineOptions() : List.of();
-
         model.mapLink(IanaLinkRelations.SELF, selfLink -> (Link) selfLink
-                .andAffordances(klabisAffordWithPromptedOptions(
+                .andAffordances(klabisAffordWithOptions(
                         methodOn(EventTypesApi.class).createEventType(null),
-                        Map.of("orisDisciplineIds", disciplineOptions))));
+                        Map.of("disciplineIds", HalFormsOptionsDef.remote(
+                                methodOn(DisciplinesApi.class).listDisciplineOptions())))));
         return model;
     }
 }
@@ -157,11 +140,17 @@ class EventTypeListPostprocessor
 @MvcComponent
 class EventTypesRootPostprocessor implements RepresentationModelProcessor<EntityModel<RootModel>> {
 
+    private final AuthorizationEvaluator authorizationEvaluator;
+
+    EventTypesRootPostprocessor(AuthorizationEvaluator authorizationEvaluator) {
+        this.authorizationEvaluator = authorizationEvaluator;
+    }
+
     @Override
     public EntityModel<RootModel> process(EntityModel<RootModel> model) {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth == null || !auth.getAuthorities().stream()
-                .anyMatch(a -> a.getAuthority().equals(Authority.EVENTS_MANAGE.toString()))) {
+        // listEventTypes only needs EVENTS_READ, but the navigation entry is an administration
+        // screen, so it is offered to managers only.
+        if (!authorizationEvaluator.has(Authority.EVENTS_MANAGE)) {
             return model;
         }
         klabisLinkTo(methodOn(EventTypesApi.class).listEventTypes())

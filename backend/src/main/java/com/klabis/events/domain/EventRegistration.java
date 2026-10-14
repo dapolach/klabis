@@ -18,7 +18,7 @@ import java.util.UUID;
  * <p>
  * Business rules:
  * - Each registration has a unique ID
- * - Both memberId and siCardNumber are required
+ * - memberId is required; siCardNumber is optional (the event's SI policy decides when it is needed)
  * - Registration timestamp is automatically set at creation
  * - Equality is based solely on registration ID
  */
@@ -29,7 +29,12 @@ public class EventRegistration {
     public record CreateEventRegistration(
             MemberId memberId,
             SiCardNumber siCardNumber,
-            EventCategoryId categoryId
+            EventCategoryId categoryId,
+            boolean wantsSharedTransport,
+            boolean wantsSharedAccommodation,
+            RegistrationNote internalNote,
+            RegistrationNote orisNote,
+            boolean wantsToRentSi
     ) {}
 
     private final UUID id;
@@ -38,23 +43,36 @@ public class EventRegistration {
     private final SiCardNumber siCardNumber;
     private final EventCategoryId categoryId;
     private final Instant registeredAt;
+    private final boolean wantsSharedTransport;
+    private final boolean wantsSharedAccommodation;
+    private final RegistrationNote internalNote;
+    private final RegistrationNote orisNote;
+    private final boolean wantsToRentSi;
 
     /**
      * Private constructor for creating EventRegistration instances.
      *
      * @param id           unique registration identifier
      * @param memberId     member's user ID
-     * @param siCardNumber SI card number for this registration
+     * @param siCardNumber SI card number for this registration; absent when the member gave none
      * @param categoryId   selected race category id (may be null when event has no categories, or orphaned
      *                     when the category was later removed from the event)
      * @param registeredAt timestamp when registration was created
      */
-    private EventRegistration(UUID id, MemberId memberId, SiCardNumber siCardNumber, EventCategoryId categoryId, Instant registeredAt) {
+    private EventRegistration(UUID id, MemberId memberId, SiCardNumber siCardNumber, EventCategoryId categoryId,
+                              Instant registeredAt, boolean wantsSharedTransport, boolean wantsSharedAccommodation,
+                              RegistrationNote internalNote, RegistrationNote orisNote,
+                              boolean wantsToRentSi) {
         this.id = id;
         this.memberId = memberId;
         this.siCardNumber = siCardNumber;
         this.categoryId = categoryId;
         this.registeredAt = registeredAt;
+        this.wantsSharedTransport = wantsSharedTransport;
+        this.wantsSharedAccommodation = wantsSharedAccommodation;
+        this.internalNote = internalNote;
+        this.orisNote = orisNote;
+        this.wantsToRentSi = wantsToRentSi;
     }
 
     /**
@@ -62,7 +80,7 @@ public class EventRegistration {
      * <p>
      * Generates a unique ID and sets the registration timestamp automatically.
      *
-     * @param command creation command with memberId and siCardNumber (both required)
+     * @param command creation command with memberId (required) and optional siCardNumber
      * @return new EventRegistration instance
      * @throws IllegalArgumentException if validation fails
      */
@@ -70,16 +88,18 @@ public class EventRegistration {
         if (command.memberId() == null) {
             throw new IllegalArgumentException("memberId is required");
         }
-        if (command.siCardNumber() == null) {
-            throw new IllegalArgumentException("siCardNumber is required");
-        }
 
         return new EventRegistration(
                 UUID.randomUUID(),
                 command.memberId(),
                 command.siCardNumber(),
                 command.categoryId(),
-                Instant.now()
+                Instant.now(),
+                command.wantsSharedTransport(),
+                command.wantsSharedAccommodation(),
+                command.internalNote(),
+                command.orisNote(),
+                command.wantsToRentSi()
         );
     }
 
@@ -87,19 +107,17 @@ public class EventRegistration {
      * Factory method for reconstructing EventRegistration from persistence layer.
      * <p>
      * This bypasses validation since the data was already validated when originally stored.
-     *
-     * @param id           registration's unique identifier
-     * @param memberId     member's user ID
-     * @param siCardNumber SI card number
-     * @param registeredAt registration timestamp
-     * @return reconstructed EventRegistration instance
      */
-    public static EventRegistration reconstruct(UUID id, MemberId memberId, SiCardNumber siCardNumber, EventCategoryId categoryId, Instant registeredAt) {
-        return new EventRegistration(id, memberId, siCardNumber, categoryId, registeredAt);
+    public static EventRegistration reconstruct(UUID id, Instant registeredAt, CreateEventRegistration data) {
+        return new EventRegistration(id, data.memberId(), data.siCardNumber(), data.categoryId(), registeredAt,
+                data.wantsSharedTransport(), data.wantsSharedAccommodation(), data.internalNote(), data.orisNote(),
+                data.wantsToRentSi());
     }
 
-    public EventRegistration withChanges(SiCardNumber newSiCard, EventCategoryId newCategoryId) {
-        return new EventRegistration(this.id, this.memberId, newSiCard, newCategoryId, this.registeredAt);
+    public EventRegistration withChanges(Event.EditRegistrationCommand changes) {
+        return new EventRegistration(this.id, this.memberId, changes.siCardNumber(), changes.categoryId(),
+                this.registeredAt, changes.wantsSharedTransport(), changes.wantsSharedAccommodation(),
+                changes.internalNote(), changes.orisNote(), changes.wantsToRentSi());
     }
 
     // ========== Getters ==========
@@ -122,6 +140,26 @@ public class EventRegistration {
 
     public Instant registeredAt() {
         return registeredAt;
+    }
+
+    public boolean wantsSharedTransport() {
+        return wantsSharedTransport;
+    }
+
+    public boolean wantsSharedAccommodation() {
+        return wantsSharedAccommodation;
+    }
+
+    public RegistrationNote internalNote() {
+        return internalNote;
+    }
+
+    public RegistrationNote orisNote() {
+        return orisNote;
+    }
+
+    public boolean wantsToRentSi() {
+        return wantsToRentSi;
     }
 
     // ========== Object Methods ==========
@@ -147,6 +185,9 @@ public class EventRegistration {
                ", siCardNumber=" + siCardNumber +
                ", categoryId=" + categoryId +
                ", registeredAt=" + registeredAt +
+               ", wantsSharedTransport=" + wantsSharedTransport +
+               ", wantsSharedAccommodation=" + wantsSharedAccommodation +
+               ", wantsToRentSi=" + wantsToRentSi +
                '}';
     }
 }

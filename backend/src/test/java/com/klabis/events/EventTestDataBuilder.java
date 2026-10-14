@@ -3,13 +3,19 @@ package com.klabis.events;
 import com.klabis.common.domain.AuditMetadata;
 import com.klabis.events.domain.Event;
 import com.klabis.events.domain.EventRanking;
+import com.klabis.events.domain.EventRegisterCommandBuilder;
+import com.klabis.events.domain.EventRegistrationCreateEventRegistrationBuilder;
 import com.klabis.events.domain.Money;
 import com.klabis.members.MemberId;
+import com.klabis.events.EventCategoryId;
 import com.klabis.events.domain.EventRegistration;
+import com.klabis.events.domain.SiCardNumber;
+import com.klabis.events.domain.SiPolicy;
 import com.klabis.events.domain.EventStatus;
 import com.klabis.events.domain.RegistrationDeadlines;
 import com.klabis.events.EventTypeId;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -26,13 +32,15 @@ public class EventTestDataBuilder {
     private LinkedHashSet<MemberId> coordinators = new LinkedHashSet<>();
     private RegistrationDeadlines registrationDeadlines = RegistrationDeadlines.none();
     private EventId eventId = new EventId(UUID.randomUUID());
-    private Integer orisId = null;
     private EventTypeId eventTypeId = null;
     private List<EventRegistration> registrations = new ArrayList<>();
     private List<EventCategory> categories = List.of();
     private AuditMetadata auditMetadata = null;
     private EventRanking ranking = null;
     private Money baseEntryFee = null;
+    private boolean sharedTransportEnabled = false;
+    private boolean sharedAccommodationEnabled = false;
+    private SiPolicy siPolicy = SiPolicy.defaultPolicy();
 
     private EventTestDataBuilder() {
     }
@@ -107,11 +115,6 @@ public class EventTestDataBuilder {
         return this;
     }
 
-    public EventTestDataBuilder withOrisId(Integer orisId) {
-        this.orisId = orisId;
-        return this;
-    }
-
     public EventTestDataBuilder withEventTypeId(EventTypeId eventTypeId) {
         this.eventTypeId = eventTypeId;
         return this;
@@ -137,6 +140,63 @@ public class EventTestDataBuilder {
         return this;
     }
 
+    public EventTestDataBuilder withSharedTransportEnabled(boolean enabled) {
+        this.sharedTransportEnabled = enabled;
+        return this;
+    }
+
+    public EventTestDataBuilder withSiPolicy(SiPolicy siPolicy) {
+        this.siPolicy = siPolicy;
+        return this;
+    }
+
+    public EventTestDataBuilder withSharedAccommodationEnabled(boolean enabled) {
+        this.sharedAccommodationEnabled = enabled;
+        return this;
+    }
+
+    public static EventRegistration aRegistration(MemberId memberId, SiCardNumber siCardNumber) {
+        return aRegistration(memberId, siCardNumber, null, Instant.now());
+    }
+
+    public static EventRegistration aRegistration(MemberId memberId, SiCardNumber siCardNumber, Instant registeredAt) {
+        return aRegistration(memberId, siCardNumber, null, registeredAt);
+    }
+
+    public static EventRegistration aRegistration(MemberId memberId, SiCardNumber siCardNumber,
+                                                  EventCategoryId categoryId) {
+        return aRegistration(memberId, siCardNumber, categoryId, Instant.now());
+    }
+
+    public static EventRegistration aRegistration(MemberId memberId, SiCardNumber siCardNumber,
+                                                  EventCategoryId categoryId, Instant registeredAt) {
+        return EventRegistration.reconstruct(UUID.randomUUID(), registeredAt,
+                EventRegistrationCreateEventRegistrationBuilder.builder()
+                        .memberId(memberId)
+                        .siCardNumber(siCardNumber)
+                        .categoryId(categoryId)
+                        .build());
+    }
+
+    public static EventRegistration aRegistrationWithSharedServices(MemberId memberId, SiCardNumber siCardNumber,
+                                                                    boolean wantsSharedTransport,
+                                                                    boolean wantsSharedAccommodation) {
+        return EventRegistration.reconstruct(UUID.randomUUID(), Instant.now(),
+                EventRegistrationCreateEventRegistrationBuilder.builder()
+                        .memberId(memberId)
+                        .siCardNumber(siCardNumber)
+                        .wantsSharedTransport(wantsSharedTransport)
+                        .wantsSharedAccommodation(wantsSharedAccommodation)
+                        .build());
+    }
+
+    public static void register(Event event, MemberId memberId, SiCardNumber siCardNumber, EventCategoryId categoryId) {
+        event.registerMember(memberId, EventRegisterCommandBuilder.builder()
+                .siCardNumber(siCardNumber.toString())
+                .categoryId(categoryId)
+                .build());
+    }
+
     public Event build() {
         return Event.reconstruct(eventId,
                 name,
@@ -149,10 +209,12 @@ public class EventTestDataBuilder {
                 registrationDeadlines,
                 EventStatus.DRAFT,
                 null,
-                orisId,
                 categories,
                 ranking,
                 baseEntryFee,
+                sharedTransportEnabled,
+                sharedAccommodationEnabled,
+                siPolicy,
                 registrations,
                 auditMetadata);
     }

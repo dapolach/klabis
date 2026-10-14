@@ -3,10 +3,12 @@ import {fireEvent, render, screen, waitFor, within} from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import {MemoryRouter} from 'react-router-dom';
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
-import {useHalPageData} from '../../hooks/useHalPageData';
 import type {UseHalPageDataReturn} from '../../hooks/useHalPageData';
+import {useHalPageData} from '../../hooks/useHalPageData';
 import {useAuthorizedMutation, useAuthorizedQuery} from '../../hooks/useAuthorizedFetch';
 import {mockHalFormsTemplate} from '../../__mocks__/halData';
+import {createMockResponse} from '../../__mocks__/mockFetch';
+import {authorizedFetch} from '../../api/authorizedFetch';
 import {EventsPage} from './EventsPage';
 import {vi} from 'vitest';
 import type {HalResponse} from '../../api';
@@ -99,6 +101,19 @@ vi.mock('../../api/authorizedFetch', () => ({
             this.responseStatus = status;
         }
     },
+}));
+
+// HalFormDisplay pulls prefill data via useHalFormData (OPTIONS probe + a query
+// keyed on the template target). The blanket useAuthorizedQuery mock above would
+// answer that query with the events list, so pin useHalFormData to the resource
+// data the dialog already handed it.
+vi.mock('../../hooks/useHalFormData', () => ({
+    useHalFormData: (_template: unknown, resourceData: Record<string, unknown>) => ({
+        formData: resourceData ?? {},
+        isLoadingTargetData: false,
+        targetFetchError: null,
+        refetchTargetData: vi.fn(),
+    }),
 }));
 
 const createMockPageData = (resourceData: HalResponse | null, overrides?: Partial<UseHalPageDataReturn>) => ({
@@ -399,6 +414,16 @@ describe('EventsPage', () => {
 
         const registerForEventTarget = '/api/events/evt-1/registrations';
 
+        const dialogEventData = {
+            name: 'Jarní závod',
+            eventDate: '2025-06-15',
+            location: 'Brno',
+            deadlines: ['2025-05-15'],
+            sharedTransportEnabled: false,
+            sharedAccommodationEnabled: false,
+            _links: {self: {href: '/api/events/evt-1'}},
+        };
+
         const buildEventWithNewRegistrationLink = (overrides: Record<string, unknown> = {}) => ({
             id: 'evt-1',
             name: 'Jarní závod',
@@ -415,37 +440,62 @@ describe('EventsPage', () => {
                     title: 'Přihlásit se',
                     properties: [
                         {name: 'siCardNumber', prompt: 'SI číslo', type: 'text'},
-                        {name: 'category', prompt: 'Kategorie', type: 'text'},
                     ],
                 }),
             },
             ...overrides,
         });
 
-        const buildNewRegistrationResponse = (siCardNumber?: string) => ({
-            siCardNumber: siCardNumber ?? '',
-            category: '',
-            _links: {self: {href: newRegistrationUrl}},
-            _templates: {
-                editRegistration: mockHalFormsTemplate({
-                    method: 'PUT',
-                    target: '/api/events/evt-1/registrations/M001',
-                    title: 'Přihlásit se',
-                    properties: [
-                        {name: 'siCardNumber', prompt: 'SI číslo', type: 'text', value: siCardNumber ?? ''},
-                        {name: 'category', prompt: 'Kategorie', type: 'text'},
-                    ],
-                }),
-            },
-        });
-
-        const renderWithEventHavingNewRegistrationLink = (siCardNumber?: string) => {
-            vi.mocked(useAuthorizedQuery).mockImplementation((url: string, options?: {enabled?: boolean}) => {
-                if (options?.enabled === false) {
-                    return {data: undefined, isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
+        const renderWithEventHavingNewRegistrationLink = (prefill: Record<string, unknown> = {siCardNumber: ''}) => {
+            const prefillResponse = {
+                firstName: 'Jana',
+                lastName: 'Nováková',
+                _links: {
+                    self: {href: newRegistrationUrl},
+                    event: {href: '/api/events/evt-1'},
+                },
+                _templates: {
+                    registerForEvent: mockHalFormsTemplate({
+                        method: 'POST',
+                        target: registerForEventTarget,
+                        title: 'Přihlásit se',
+                        properties: [
+                            {name: 'siCardNumber', prompt: 'SI číslo', type: 'text'},
+                        ],
+                    }),
+                },
+                ...prefill,
+            };
+            vi.mocked(authorizedFetch).mockImplementation(((url: string) => {
+                if (url.includes('newRegistration=true')) {
+                    return Promise.resolve(createMockResponse(prefillResponse));
+                }
+                if (url === '/api/events/evt-1') {
+                    return Promise.resolve(createMockResponse(dialogEventData));
+                }
+                return Promise.resolve(createMockResponse({}));
+            }) as typeof authorizedFetch);
+            vi.mocked(useAuthorizedQuery).mockImplementation(((url: string) => {
+                if (url === '/api/event-types') {
+                    return {
+                        data: {_embedded: {eventTypeDtoList: []}},
+                        isLoading: false,
+                        error: null,
+                    } as unknown as ReturnType<typeof useAuthorizedQuery>;
                 }
                 if (url.includes('newRegistration=true')) {
-                    return {data: buildNewRegistrationResponse(siCardNumber), isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
+                    return {
+                        data: prefillResponse,
+                        isLoading: false,
+                        error: null,
+                    } as unknown as ReturnType<typeof useAuthorizedQuery>;
+                }
+                if (url === '/api/events/evt-1') {
+                    return {
+                        data: dialogEventData,
+                        isLoading: false,
+                        error: null,
+                    } as unknown as ReturnType<typeof useAuthorizedQuery>;
                 }
                 return {
                     data: {
@@ -456,77 +506,62 @@ describe('EventsPage', () => {
                     isLoading: false,
                     error: null,
                 } as unknown as ReturnType<typeof useAuthorizedQuery>;
-            });
+            }) as typeof useAuthorizedQuery);
             return renderPage(createMockPageData({
                 _links: {self: {href: '/api/events'}},
             }));
         };
 
-        it('shows "Přihlásit se" button when event has new-registration link', async () => {
-            renderWithEventHavingNewRegistrationLink('12345');
-            expect(await screen.findByTitle(labels.templates.registerForEvent)).toBeInTheDocument();
-        });
-
-        it('opens registration form prefilled with siCardNumber when button clicked', async () => {
-            const user = userEvent.setup();
-            renderWithEventHavingNewRegistrationLink('12345');
-
-            const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
-            await user.click(registerBtn);
-
-            const siInput = await screen.findByDisplayValue('12345');
-            expect(siInput).toBeInTheDocument();
-        });
-
-        it('opens registration form with empty SI field when member has no chip number', async () => {
-            const user = userEvent.setup();
-            renderWithEventHavingNewRegistrationLink('');
-
-            const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
-            await user.click(registerBtn);
-
-            await screen.findByTestId('hal-forms-display');
-            const siInput = document.querySelector('input[name="siCardNumber"]') as HTMLInputElement | null;
-            expect(siInput).toBeInTheDocument();
-            expect(siInput).toHaveValue('');
-        });
-
-        it('submits overwritten siCardNumber value', async () => {
-            const user = userEvent.setup();
-            const mutateMock = vi.fn();
-            vi.mocked(useAuthorizedQuery).mockImplementation((url: string, options?: {enabled?: boolean}) => {
-                if (options?.enabled === false) {
-                    return {data: undefined, isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
-                }
-                if (url.includes('newRegistration=true')) {
-                    return {data: buildNewRegistrationResponse('12345'), isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
-                }
-                return {
-                    data: {
-                        _links: {self: {href: '/api/events'}},
-                        _embedded: {eventSummaryDtoList: [buildEventWithNewRegistrationLink()]},
-                        page: {totalElements: 1, totalPages: 1, size: 10, number: 0},
-                    },
-                    isLoading: false,
-                    error: null,
-                } as unknown as ReturnType<typeof useAuthorizedQuery>;
-            });
+        const withMutateMock = (mutateMock = vi.fn()) => {
             vi.mocked(useAuthorizedMutation).mockReturnValue({
                 mutate: mutateMock,
                 isPending: false,
                 error: null,
             } as unknown as ReturnType<typeof useAuthorizedMutation>);
+            return mutateMock;
+        };
 
-            renderPage(createMockPageData({_links: {self: {href: '/api/events'}}}));
+        it('shows "Přihlásit se" button when event has new-registration link', async () => {
+            renderWithEventHavingNewRegistrationLink({siCardNumber: '12345'});
+            expect(await screen.findByTitle(labels.templates.registerForEvent)).toBeInTheDocument();
+        });
+
+        it('opens registration dialog prefilled with siCardNumber from member defaults when button clicked', async () => {
+            const user = userEvent.setup();
+            renderWithEventHavingNewRegistrationLink({siCardNumber: '12345'});
 
             const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
             await user.click(registerBtn);
 
-            const siInput = await screen.findByDisplayValue('12345');
+            const siInput = await screen.findByLabelText(/SI čip/);
+            expect(siInput).toHaveValue('12345');
+            expect(screen.getByTestId('modal-context')).toHaveTextContent('Jarní závod');
+        });
+
+        it('opens registration dialog with empty SI field when member has no chip number', async () => {
+            const user = userEvent.setup();
+            renderWithEventHavingNewRegistrationLink({siCardNumber: ''});
+
+            const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
+            await user.click(registerBtn);
+
+            const siInput = await screen.findByLabelText(/SI čip/);
+            expect(siInput).toHaveValue('');
+        });
+
+        it('submits overwritten siCardNumber value to the mutation', async () => {
+            const user = userEvent.setup();
+            const mutateMock = withMutateMock();
+            renderWithEventHavingNewRegistrationLink({siCardNumber: '12345'});
+
+            const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
+            await user.click(registerBtn);
+
+            const siInput = await screen.findByLabelText(/SI čip/);
             await user.clear(siInput);
             await user.type(siInput, '99999');
 
-            await user.click(screen.getByRole('button', {name: /odeslat/i}));
+            await user.click(screen.getByRole('button', {name: labels.events.registrationModal.confirmNew}));
 
             await waitFor(() => {
                 expect(mutateMock).toHaveBeenCalledWith(
@@ -538,49 +573,25 @@ describe('EventsPage', () => {
             });
         });
 
-        it('submits new registration via POST to registerForEvent URL, not PUT to editRegistration', async () => {
+        it('submits new registration to the normalized registerForEvent target, not the prefill URL', async () => {
             const user = userEvent.setup();
-            const mutateMock = vi.fn();
-            vi.mocked(useAuthorizedQuery).mockImplementation((url: string, options?: {enabled?: boolean}) => {
-                if (options?.enabled === false) {
-                    return {data: undefined, isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
-                }
-                if (url.includes('newRegistration=true')) {
-                    return {data: buildNewRegistrationResponse('12345'), isLoading: false, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>;
-                }
-                return {
-                    data: {
-                        _links: {self: {href: '/api/events'}},
-                        _embedded: {eventSummaryDtoList: [buildEventWithNewRegistrationLink()]},
-                        page: {totalElements: 1, totalPages: 1, size: 10, number: 0},
-                    },
-                    isLoading: false,
-                    error: null,
-                } as unknown as ReturnType<typeof useAuthorizedQuery>;
-            });
-            vi.mocked(useAuthorizedMutation).mockReturnValue({
-                mutate: mutateMock,
-                isPending: false,
-                error: null,
-            } as unknown as ReturnType<typeof useAuthorizedMutation>);
-
-            renderPage(createMockPageData({_links: {self: {href: '/api/events'}}}));
+            const mutateMock = withMutateMock();
+            renderWithEventHavingNewRegistrationLink({siCardNumber: '12345'});
 
             const registerBtn = await screen.findByTitle(labels.templates.registerForEvent);
             await user.click(registerBtn);
 
-            await screen.findByTestId('hal-forms-display');
-            await user.click(screen.getByRole('button', {name: /odeslat/i}));
+            await screen.findByLabelText(/SI čip/);
+            await user.click(screen.getByRole('button', {name: labels.events.registrationModal.confirmNew}));
 
             await waitFor(() => {
                 expect(mutateMock).toHaveBeenCalledWith(
-                    expect.objectContaining({url: registerForEventTarget}),
+                    expect.objectContaining({url: '/events/evt-1/registrations'}),
                     expect.anything(),
                 );
             });
-            // Must NOT submit to the editRegistration PUT URL
             expect(mutateMock).not.toHaveBeenCalledWith(
-                expect.objectContaining({url: '/api/events/evt-1/registrations/M001'}),
+                expect.objectContaining({url: newRegistrationUrl}),
                 expect.anything(),
             );
         });
@@ -827,6 +838,253 @@ describe('EventsPage', () => {
         it('shows no badge when event has eventTypeId not found in catalog', () => {
             renderWithEventsAndTypes([buildEventWithType('unknown-type-id')], []);
             expect(screen.queryByText('Trénink')).not.toBeInTheDocument();
+        });
+    });
+
+    describe('status column authority gate (D4/D5)', () => {
+        // Both fixtures carry `status` in the row payload, so the column can only be absent
+        // because of the explicit _templates.createEvent gate — not via the implicit
+        // hideEmptyColumns path, which no longer triggers now that the field is ungated (D4).
+        const buildEventRow = () => ({
+            id: 'evt-status-1',
+            name: 'Závod s plným statusem',
+            eventDate: '2026-06-01',
+            status: 'ACTIVE',
+            _links: {self: {href: '/api/events/evt-status-1'}},
+        });
+
+        const renderList = (resourceData: HalResponse) => {
+            vi.mocked(useAuthorizedQuery).mockReturnValue({
+                data: {
+                    _links: {self: {href: '/api/events'}},
+                    _embedded: {eventSummaryDtoList: [buildEventRow()]},
+                    page: {totalElements: 1, totalPages: 1, size: 10, number: 0},
+                },
+                isLoading: false,
+                error: null,
+            } as unknown as ReturnType<typeof useAuthorizedQuery>);
+            return renderPage(createMockPageData(resourceData));
+        };
+
+        it('does not render the status column when the list has no _templates.createEvent', () => {
+            renderList({_links: {self: {href: '/api/events'}}});
+
+            expect(screen.getByText('Závod s plným statusem')).toBeInTheDocument();
+            expect(screen.queryByRole('columnheader', {name: labels.tables.status})).not.toBeInTheDocument();
+        });
+
+        it('renders the status column when the list has _templates.createEvent', () => {
+            renderList({
+                _links: {self: {href: '/api/events'}},
+                _templates: {createEvent: mockHalFormsTemplate({method: 'POST', title: 'Přidat závod'})},
+            });
+
+            expect(screen.getByRole('columnheader', {name: labels.tables.status})).toBeInTheDocument();
+            expect(screen.getByText('Aktivní')).toBeInTheDocument();
+        });
+    });
+
+    describe('sync indicator in actions cell (I9)', () => {
+        const buildEnrolledEventRow = () => ({
+            id: 'evt-sync',
+            name: 'Synced event',
+            eventDate: '2026-04-15',
+            status: 'ACTIVE',
+            _links: {
+                self: {href: '/api/events/evt-sync'},
+                sync: {href: '/api/events/evt-sync/sync'},
+            },
+        });
+
+        const buildUnenrolledEventRow = () => ({
+            id: 'evt-no-sync',
+            name: 'Plain event',
+            eventDate: '2026-04-15',
+            status: 'ACTIVE',
+            _links: {self: {href: '/api/events/evt-no-sync'}},
+        });
+
+        const renderEventsWithSyncControl = (rows: unknown[]) => {
+            vi.mocked(useAuthorizedQuery).mockReturnValue({
+                data: {
+                    _links: {self: {href: '/api/events'}},
+                    _embedded: {eventSummaryDtoList: rows},
+                    page: {totalElements: rows.length, totalPages: 1, size: 10, number: 0},
+                },
+                isLoading: false,
+                error: null,
+            } as unknown as ReturnType<typeof useAuthorizedQuery>);
+            return renderPage(createMockPageData({
+                _links: {self: {href: '/api/events'}},
+            }));
+        };
+
+        it('does not render a separate Synchronizace column header', () => {
+            renderEventsWithSyncControl([buildEnrolledEventRow()]);
+            expect(screen.queryByRole('columnheader', {name: 'Synchronizace'})).not.toBeInTheDocument();
+        });
+
+        it('renders SyncStatusIndicator in the actions cell for an enrolled row (has _links.sync)', () => {
+            renderEventsWithSyncControl([buildEnrolledEventRow()]);
+            // SyncStatusIndicator mounts with sync link; mocked query returns empty data so it falls through to error state.
+            expect(screen.getByTestId('sync-error')).toBeInTheDocument();
+        });
+
+        it('does not render any sync indicator in the actions cell for an unenrolled row (no _links.sync)', () => {
+            renderEventsWithSyncControl([buildUnenrolledEventRow()]);
+            expect(screen.queryByTestId('sync-error')).not.toBeInTheDocument();
+            expect(screen.queryByTestId('sync-loading')).not.toBeInTheDocument();
+            expect(screen.queryByTestId(/^sync-status-/)).not.toBeInTheDocument();
+        });
+
+        it('renders the sync indicator after the action buttons in the actions cell', () => {
+            const buildEnrolledRowWithActionTemplate = () => ({
+                id: 'evt-sync-action',
+                name: 'Actionable synced event',
+                eventDate: '2026-04-15',
+                status: 'ACTIVE',
+                _links: {
+                    self: {href: '/api/events/evt-sync-action'},
+                    sync: {href: '/api/events/evt-sync-action/sync'},
+                },
+                _templates: {
+                    cancelEvent: mockHalFormsTemplate({
+                        method: 'POST',
+                        target: '/api/events/evt-sync-action/cancel',
+                        title: 'Zrušit akci',
+                    }),
+                },
+            });
+            renderEventsWithSyncControl([buildEnrolledRowWithActionTemplate()]);
+
+            const cancelButton = screen.getByTitle(labels.templates.cancelEvent);
+            const syncError = screen.getByTestId('sync-error');
+            expect(cancelButton.compareDocumentPosition(syncError) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        });
+
+        it('does not propagate badge click to row navigation when badge has templates', async () => {
+            const user = userEvent.setup();
+            const navigateToResource = vi.fn();
+            const syncTemplate = mockHalFormsTemplate({
+                method: 'POST',
+                target: '/api/events/evt-sync/sync/synchronize',
+                title: 'Synchronize',
+                properties: [],
+            });
+            vi.mocked(useAuthorizedQuery).mockImplementation((url: unknown) => {
+                if (typeof url === 'string' && url.includes('/sync')) {
+                    return {
+                        data: {
+                            entityType: 'events',
+                            status: 'IN_SYNC',
+                            externalSystem: 'ORIS',
+                            _links: {self: {href: '/api/events/evt-sync/sync'}},
+                            _templates: {synchronizeNow: syncTemplate},
+                        },
+                        isLoading: false,
+                        error: null,
+                    } as unknown as ReturnType<typeof useAuthorizedQuery>;
+                }
+                return {
+                    data: {
+                        _links: {self: {href: '/api/events'}},
+                        _embedded: {eventSummaryDtoList: [buildEnrolledEventRow()]},
+                        page: {totalElements: 1, totalPages: 1, size: 10, number: 0},
+                    },
+                    isLoading: false,
+                    error: null,
+                } as unknown as ReturnType<typeof useAuthorizedQuery>;
+            });
+            renderPage(createMockPageData(
+                {_links: {self: {href: '/api/events'}}},
+                {route: {
+                    pathname: '/events',
+                    navigateToResource,
+                    refetch: async () => {},
+                    queryState: 'success' as const,
+                    getResourceLink: vi.fn().mockReturnValue({href: 'http://localhost/api/events'}),
+                }},
+            ));
+
+            const badge = await screen.findByTestId('sync-status-IN_SYNC');
+            await user.click(badge);
+
+            expect(navigateToResource).not.toHaveBeenCalled();
+            expect(await screen.findByTestId('sync-overlay-modal')).toBeInTheDocument();
+        });
+    });
+
+    describe('cancelled row marking (D5)', () => {
+        const buildEventRow = (overrides: Record<string, unknown> = {}) => ({
+            id: 'evt-cancelled',
+            name: 'Zrušený závod',
+            location: 'Jihlava',
+            eventDate: '2026-06-01',
+            status: 'CANCELLED',
+            _links: {self: {href: '/api/events/evt-cancelled'}},
+            ...overrides,
+        });
+
+        const renderRows = (
+            rows: unknown[],
+            resourceData: HalResponse = {_links: {self: {href: '/api/events'}}},
+            overrides?: Partial<UseHalPageDataReturn>,
+        ) => {
+            vi.mocked(useAuthorizedQuery).mockReturnValue({
+                data: {
+                    _links: {self: {href: '/api/events'}},
+                    _embedded: {eventSummaryDtoList: rows},
+                    page: {totalElements: rows.length, totalPages: 1, size: 10, number: 0},
+                },
+                isLoading: false,
+                error: null,
+            } as unknown as ReturnType<typeof useAuthorizedQuery>);
+            return renderPage(createMockPageData(resourceData, overrides));
+        };
+
+        it('strikes through the name of a cancelled event', () => {
+            renderRows([buildEventRow()]);
+
+            expect(screen.getByText('Zrušený závod', {exact: false})).toHaveClass('line-through');
+        });
+
+        it('repeats the cancelled state for screen readers', () => {
+            renderRows([buildEventRow()]);
+
+            expect(screen.getByText('— Zrušeno')).toBeInTheDocument();
+        });
+
+        it('renders the plain name for ACTIVE, FINISHED and DRAFT events', () => {
+            renderRows([
+                buildEventRow({id: 'evt-active', name: 'Aktivní závod', status: 'ACTIVE'}),
+                buildEventRow({id: 'evt-finished', name: 'Ukončený závod', status: 'FINISHED'}),
+                buildEventRow({id: 'evt-draft', name: 'Koncept závodu', status: 'DRAFT'}),
+            ]);
+
+            expect(screen.getByText('Aktivní závod')).not.toHaveClass('line-through');
+            expect(screen.getByText('Ukončený závod')).not.toHaveClass('line-through');
+            expect(screen.getByText('Koncept závodu')).not.toHaveClass('line-through');
+        });
+
+        it('strikes only the name, leaving the other cells of the row normal', () => {
+            renderRows([buildEventRow()]);
+
+            expect(screen.getByText('Zrušený závod', {exact: false})).toHaveClass('line-through');
+            expect(screen.getByText('Jihlava')).not.toHaveClass('line-through');
+        });
+
+        it('renders no tooltip on the status cell of a cancelled event', () => {
+            renderRows(
+                [buildEventRow()],
+                {
+                    _links: {self: {href: '/api/events'}},
+                    _templates: {createEvent: mockHalFormsTemplate({method: 'POST', title: 'Přidat závod'})},
+                },
+            );
+
+            // Managers see the status column, but it must carry no title: the reason is a
+            // detail-page signal, and the struck name is the list marker (D5).
+            expect(screen.getByText('Zrušeno')).not.toHaveAttribute('title');
         });
     });
 });

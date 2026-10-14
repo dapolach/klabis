@@ -1,17 +1,15 @@
 package com.klabis.events.infrastructure.restapi;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
-import com.klabis.common.ui.HalFormsSupport;
+import com.klabis.events.EventsWebMvcTest;
 import com.klabis.common.users.Authority;
 import com.klabis.events.EventId;
 import com.klabis.events.EventTestDataBuilder;
 import com.klabis.events.application.BulkImportResult;
 import com.klabis.events.application.BulkSyncResult;
-import com.klabis.events.application.DuplicateOrisImportException;
 import com.klabis.events.application.EventManagementPort;
 import com.klabis.events.application.EventNotFoundException;
+import com.klabis.events.application.EventSyncNeedsResolutionException;
 import com.klabis.events.application.EventRegistrationPort;
 import com.klabis.events.application.OrisBulkSyncPort;
 import com.klabis.events.application.OrisEventBulkImportPort;
@@ -19,12 +17,12 @@ import com.klabis.events.application.OrisEventImportPort;
 import com.klabis.events.domain.Event;
 import com.klabis.events.domain.EventFilter;
 import com.klabis.members.Members;
+import com.klabis.sync.application.SynchronizationPort;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.hateoas.MediaTypes;
@@ -34,12 +32,10 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.LocalDate;
 import java.util.List;
-import java.util.UUID;
+import java.util.Optional;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -48,10 +44,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DisplayName("OrisEventController API tests")
-@WebMvcTest(controllers = {EventController.class, OrisEventController.class, EventsExceptionHandler.class})
-@ActiveProfiles("oris")
-@Import({EncryptionConfiguration.class, HalFormsSupport.class})
-@WithPostprocessors
+/**
+ * ORIS-enabled variant: the {@code oris} profile and the ORIS ports exist only with the feature on, so they are
+ * declared here (own Spring context) while the "disabled" behaviour is covered by
+ * {@code EventControllerTest.OrisImportDisabledTests} in the shared context.
+ */
+@EventsWebMvcTest
+@ActiveProfiles({"test", "oris"})
+@MockitoBean(types = {OrisEventImportPort.class, OrisEventBulkImportPort.class, OrisBulkSyncPort.class})
 class OrisEventControllerTest {
 
     private static final String ADMIN_USERNAME = "admin";
@@ -59,26 +59,32 @@ class OrisEventControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
-    @MockitoBean
+    @Autowired
     private EventManagementPort eventManagementService;
 
-    @MockitoBean
+    @Autowired
     private EventRegistrationPort eventRegistrationService;
 
-    @MockitoBean
+    @Autowired
     private Members members;
 
-    @MockitoBean
+    @Autowired
     private OrisEventImportPort orisEventImportPort;
 
-    @MockitoBean
+    @Autowired
     private OrisEventBulkImportPort orisEventBulkImportPort;
 
-    @MockitoBean
+    @Autowired
     private OrisBulkSyncPort orisBulkSyncPort;
 
-    @MockitoBean
-    private AccommodationListCsvRenderer csvRenderer;
+    @Autowired
+    private SynchronizationPort synchronizationPort;
+
+    @BeforeEach
+    void stubSynchronizationPortAbsentByDefault() {
+        when(synchronizationPort.findByTarget(any())).thenReturn(Optional.empty());
+        when(synchronizationPort.findActiveByTargets(any(), any())).thenReturn(List.of());
+    }
 
     @Nested
     @DisplayName("POST /api/events/import")
@@ -105,6 +111,8 @@ class OrisEventControllerTest {
         @DisplayName("should return 403 without EVENTS:MANAGE authority")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldReturn403WithoutEventsManageAuthority() throws Exception {
+            when(orisEventImportPort.importEventFromOris(org.mockito.ArgumentMatchers.anyInt())).thenReturn(EventTestDataBuilder.anEvent().build());
+
             mockMvc.perform(
                             post("/api/events/import")
                                     .contentType("application/json")
@@ -115,11 +123,28 @@ class OrisEventControllerTest {
         }
 
         @Test
-        @DisplayName("should return 409 when ORIS event already imported")
+        @DisplayName("should return 201 with Location header on repeated import instead of 409 (design.md D10, task 9.5)")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
-        void shouldReturn409WhenDuplicate() throws Exception {
+        void shouldReturn201OnRepeatedImport() throws Exception {
+            Event existingEvent = EventTestDataBuilder.anEvent().withName("Already Imported Race").build();
+            when(orisEventImportPort.importEventFromOris(9876)).thenReturn(existingEvent);
+
+            mockMvc.perform(
+                            post("/api/events/import")
+                                    .contentType("application/json")
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                                    .content("{\"orisId\": 9876}")
+                    )
+                    .andExpect(status().isCreated())
+                    .andExpect(header().exists("Location"));
+        }
+
+        @Test
+        @DisplayName("should return 409 pointing at the synchronisation resource when the event awaits a decision (design.md D10, task 9.3)")
+        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
+        void shouldReturn409WhenImportedEventNeedsResolution() throws Exception {
             when(orisEventImportPort.importEventFromOris(9876))
-                    .thenThrow(new DuplicateOrisImportException(9876));
+                    .thenThrow(new EventSyncNeedsResolutionException(9876));
 
             mockMvc.perform(
                             post("/api/events/import")
@@ -148,54 +173,6 @@ class OrisEventControllerTest {
     }
 
     @Nested
-    @DisplayName("POST /api/events/{id}/sync-from-oris")
-    class SyncFromOrisTests {
-
-        @Test
-        @DisplayName("should return 204 No Content on successful sync")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
-        void shouldSyncEventFromOris() throws Exception {
-            UUID eventId = UUID.randomUUID();
-
-            mockMvc.perform(
-                            post("/api/events/{id}/sync-from-oris", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isNoContent());
-
-            verify(orisEventImportPort).syncEventFromOris(new EventId(eventId));
-        }
-
-        @Test
-        @DisplayName("should return 403 without EVENTS:MANAGE authority")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
-        void shouldReturn403WithoutEventsManageAuthority() throws Exception {
-            UUID eventId = UUID.randomUUID();
-
-            mockMvc.perform(
-                            post("/api/events/{id}/sync-from-oris", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isForbidden());
-        }
-
-        @Test
-        @DisplayName("should return 404 when event not found")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
-        void shouldReturn404WhenEventNotFound() throws Exception {
-            UUID eventId = UUID.randomUUID();
-            doThrow(new EventNotFoundException(new EventId(eventId)))
-                    .when(orisEventImportPort).syncEventFromOris(any());
-
-            mockMvc.perform(
-                            post("/api/events/{id}/sync-from-oris", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isNotFound());
-        }
-    }
-
-    @Nested
     @DisplayName("GET /api/events — importFromOris affordance visibility")
     class ImportAffordanceTests {
 
@@ -203,7 +180,7 @@ class OrisEventControllerTest {
         @DisplayName("should include importFromOris affordance when oris profile is active and user has EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
         void shouldIncludeImportAffordanceWhenOrisActiveAndManager() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(
@@ -218,7 +195,7 @@ class OrisEventControllerTest {
         @DisplayName("should NOT include importEvent affordance when user lacks EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldNotIncludeImportAffordanceWithoutManageAuthority() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(
@@ -231,112 +208,6 @@ class OrisEventControllerTest {
     }
 
     @Nested
-    @DisplayName("GET /api/events/{id} — syncFromOris affordance visibility")
-    class SyncFromOrisAffordanceTests {
-
-        @Test
-        @DisplayName("should include syncFromOris affordance for DRAFT event with orisId when oris is active")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
-        void shouldIncludeSyncAffordanceForDraftEventWithOrisId() throws Exception {
-            UUID eventId = UUID.randomUUID();
-            Event draftEvent = EventTestDataBuilder.anEventWithId(new EventId(eventId))
-                    .withOrisId(100)
-                    .build();
-
-            when(eventManagementService.getEvent(any(), anyBoolean())).thenReturn(draftEvent);
-            when(eventRegistrationService.listRegistrations(any())).thenReturn(List.of());
-
-            mockMvc.perform(
-                            get("/api/events/{id}", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$._templates.syncEventFromOris.target").exists());
-        }
-
-        @Test
-        @DisplayName("should include syncFromOris affordance for ACTIVE event with orisId when oris is active")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
-        void shouldIncludeSyncAffordanceForActiveEventWithOrisId() throws Exception {
-            UUID eventId = UUID.randomUUID();
-            Event activeEvent = EventTestDataBuilder.anEventWithId(new EventId(eventId))
-                    .withOrisId(100)
-                    .buildPublished();
-
-            when(eventManagementService.getEvent(any(), anyBoolean())).thenReturn(activeEvent);
-            when(eventRegistrationService.listRegistrations(any())).thenReturn(List.of());
-
-            mockMvc.perform(
-                            get("/api/events/{id}", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$._templates.syncEventFromOris.target").exists());
-        }
-
-        @Test
-        @DisplayName("should NOT include syncFromOris affordance when event has no orisId")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
-        void shouldNotIncludeSyncAffordanceWhenNoOrisId() throws Exception {
-            UUID eventId = UUID.randomUUID();
-            Event draftEvent = EventTestDataBuilder.anEvent().build();
-
-            when(eventManagementService.getEvent(any(), anyBoolean())).thenReturn(draftEvent);
-            when(eventRegistrationService.listRegistrations(any())).thenReturn(List.of());
-
-            mockMvc.perform(
-                            get("/api/events/{id}", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$._templates.syncEventFromOris").doesNotExist());
-        }
-
-        @Test
-        @DisplayName("should NOT include syncFromOris affordance for FINISHED event")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
-        void shouldNotIncludeSyncAffordanceForFinishedEvent() throws Exception {
-            UUID eventId = UUID.randomUUID();
-            Event finishedEvent = EventTestDataBuilder.anEventWithId(new EventId(eventId))
-                    .withOrisId(100)
-                    .buildFinished();
-
-            when(eventManagementService.getEvent(any(), anyBoolean())).thenReturn(finishedEvent);
-            when(eventRegistrationService.listRegistrations(any())).thenReturn(List.of());
-
-            mockMvc.perform(
-                            get("/api/events/{id}", eventId)
-                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
-                    )
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$._templates.syncEventFromOris").doesNotExist());
-        }
-    }
-
-    @Nested
-    @DisplayName("GET /api/events — list row ORIS affordances")
-    class ListRowOrisAffordancesTests {
-
-        private static String tpl(String name) {
-            return "$._embedded.eventSummaryDtoList[0]._templates." + name;
-        }
-
-        @Test
-        @DisplayName("ORIS-imported DRAFT row additionally carries syncEventFromOris affordance")
-        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
-        void orisImportedDraftRowCarriesSyncAffordance() throws Exception {
-            Event orisEvent = EventTestDataBuilder.anEvent().withOrisId(42).build();
-
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
-                    .thenReturn(new PageImpl<>(List.of(orisEvent), PageRequest.of(0, 10), 1));
-
-            mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath(tpl("syncEventFromOris.target")).exists());
-        }
-    }
-
-    @Nested
     @DisplayName("POST /api/events/sync-from-oris/all-upcoming — bulk sync")
     class BulkSyncTests {
 
@@ -344,11 +215,11 @@ class OrisEventControllerTest {
         @DisplayName("should return 200 with successCount=3 and failureCount=0 when all events sync")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
         void shouldReturnSuccessSummaryWhenAllSync() throws Exception {
-            BulkSyncResult result = new BulkSyncResult(3, 3, 0, List.of(
+            BulkSyncResult result = new BulkSyncResult(3, List.of(
                     new BulkSyncResult.EventSyncEntry(EventId.generate(), "Race A", BulkSyncResult.SyncStatus.SYNCED, null),
                     new BulkSyncResult.EventSyncEntry(EventId.generate(), "Race B", BulkSyncResult.SyncStatus.SYNCED, null),
                     new BulkSyncResult.EventSyncEntry(EventId.generate(), "Race C", BulkSyncResult.SyncStatus.SYNCED, null)
-            ));
+            ), List.of(), List.of());
             when(orisBulkSyncPort.syncAllUpcoming()).thenReturn(result);
 
             mockMvc.perform(post("/api/events/sync-from-oris/all-upcoming")
@@ -364,10 +235,10 @@ class OrisEventControllerTest {
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
         void shouldReturnPartialFailureSummary() throws Exception {
             EventId failedId = EventId.generate();
-            BulkSyncResult result = new BulkSyncResult(2, 1, 1, List.of(
+            BulkSyncResult result = new BulkSyncResult(2, List.of(
                     new BulkSyncResult.EventSyncEntry(EventId.generate(), "Race A", BulkSyncResult.SyncStatus.SYNCED, null),
                     new BulkSyncResult.EventSyncEntry(failedId, "Race B", BulkSyncResult.SyncStatus.FAILED, "ORIS endpoint returned 404")
-            ));
+            ), List.of(), List.of());
             when(orisBulkSyncPort.syncAllUpcoming()).thenReturn(result);
 
             mockMvc.perform(post("/api/events/sync-from-oris/all-upcoming")
@@ -381,9 +252,35 @@ class OrisEventControllerTest {
         }
 
         @Test
+        @DisplayName("should report CONFLICT and FAILED records separately from failureCount (design.md D18)")
+        @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_MANAGE})
+        void shouldReportAwaitingDecisionAndStoppedByFailureSeparately() throws Exception {
+            EventId conflictedId = EventId.generate();
+            EventId failedId = EventId.generate();
+            BulkSyncResult result = new BulkSyncResult(2,
+                    List.of(),
+                    List.of(new BulkSyncResult.EventSyncEntry(conflictedId, "Race A", null, null)),
+                    List.of(new BulkSyncResult.EventSyncEntry(failedId, "Race B", null, null)));
+            when(orisBulkSyncPort.syncAllUpcoming()).thenReturn(result);
+
+            mockMvc.perform(post("/api/events/sync-from-oris/all-upcoming")
+                            .accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.totalProcessed").value(2))
+                    .andExpect(jsonPath("$.successCount").value(0))
+                    .andExpect(jsonPath("$.failureCount").value(0))
+                    .andExpect(jsonPath("$.awaitingDecisionCount").value(1))
+                    .andExpect(jsonPath("$.stoppedByFailureCount").value(1))
+                    .andExpect(jsonPath("$.awaitingDecision[0].name").value("Race A"))
+                    .andExpect(jsonPath("$.stoppedByFailure[0].name").value("Race B"));
+        }
+
+        @Test
         @DisplayName("should return 403 without EVENTS:MANAGE authority")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldReturn403WithoutEventsManageAuthority() throws Exception {
+            when(orisBulkSyncPort.syncAllUpcoming()).thenReturn(new BulkSyncResult(0, List.of(), List.of(), List.of()));
+
             mockMvc.perform(post("/api/events/sync-from-oris/all-upcoming")
                             .accept(MediaTypes.HAL_FORMS_JSON_VALUE))
                     .andExpect(status().isForbidden());
@@ -393,7 +290,7 @@ class OrisEventControllerTest {
         @DisplayName("should expose bulk-sync-oris affordance in events list when caller has EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
         void shouldExposeBulkSyncAffordanceInEventsListForManager() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
@@ -405,7 +302,7 @@ class OrisEventControllerTest {
         @DisplayName("should NOT expose bulk-sync-oris affordance in events list when caller lacks EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldNotExposeBulkSyncAffordanceWhenNotManager() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
@@ -417,7 +314,7 @@ class OrisEventControllerTest {
         @DisplayName("regression: syncAllUpcomingFromOris affordance present on filtered list (dateFrom param)")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
         void shouldExposeBulkSyncAffordanceOnFilteredListWithDateFrom() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events")
@@ -513,6 +410,8 @@ class OrisEventControllerTest {
         @DisplayName("should return 403 without EVENTS:MANAGE authority")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldReturn403WithoutEventsManageAuthority() throws Exception {
+            when(orisEventBulkImportPort.importEventsFromOris(any())).thenReturn(new BulkImportResult(0, 0, 0, List.of()));
+
             mockMvc.perform(
                             post("/api/events/import-batch")
                                     .contentType("application/json")
@@ -531,7 +430,7 @@ class OrisEventControllerTest {
         @DisplayName("should include importEventsBatch affordance when oris profile active and user has EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
         void shouldIncludeImportBatchAffordanceWhenOrisActiveAndManager() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
@@ -543,7 +442,7 @@ class OrisEventControllerTest {
         @DisplayName("should NOT include importEventsBatch affordance when user lacks EVENTS:MANAGE")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ})
         void shouldNotIncludeImportBatchAffordanceWithoutManageAuthority() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
@@ -555,7 +454,7 @@ class OrisEventControllerTest {
         @DisplayName("should also keep importEvent affordance alongside importEventsBatch")
         @WithKlabisMockUser(username = ADMIN_USERNAME, authorities = {Authority.EVENTS_READ, Authority.EVENTS_MANAGE})
         void shouldKeepImportEventAffordanceAlongsideImportBatch() throws Exception {
-            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean()))
+            when(eventManagementService.listEvents(any(EventFilter.class), any(), anyBoolean(), any()))
                     .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 10), 0));
 
             mockMvc.perform(get("/api/events").accept(MediaTypes.HAL_FORMS_JSON_VALUE))

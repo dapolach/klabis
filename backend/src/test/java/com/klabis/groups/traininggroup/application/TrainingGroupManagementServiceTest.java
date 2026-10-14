@@ -1,14 +1,15 @@
 package com.klabis.groups.traininggroup.application;
 
-import com.klabis.groups.common.domain.GroupMembership;
-import com.klabis.groups.common.domain.GroupNotFoundException;
-import com.klabis.members.ActiveMembersByAgeProvider;
-import com.klabis.members.MemberId;
-import com.klabis.groups.common.domain.TrainingGroupFilter;
+import com.klabis.common.groups.domain.GroupMembership;
+import com.klabis.common.groups.domain.GroupNotFoundException;
+import com.klabis.common.groups.domain.OwnerCannotBeMemberException;
+import com.klabis.groups.traininggroup.TrainingGroupId;
 import com.klabis.groups.traininggroup.domain.AgeRange;
 import com.klabis.groups.traininggroup.domain.TrainingGroup;
-import com.klabis.groups.traininggroup.TrainingGroupId;
+import com.klabis.groups.traininggroup.domain.TrainingGroupFilter;
 import com.klabis.groups.traininggroup.domain.TrainingGroupRepository;
+import com.klabis.members.ActiveMembersByAgeProvider;
+import com.klabis.members.MemberId;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -18,7 +19,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,6 +51,17 @@ class TrainingGroupManagementServiceTest {
     @BeforeEach
     void setUp() {
         service = new TrainingGroupManagementService(trainingGroupRepository, activeMembersByAgeProvider);
+    }
+
+    @Test
+    @DisplayName("findTrainingGroupOfMember() should look up the group the member belongs to")
+    void shouldFindTrainingGroupOfMember() {
+        TrainingGroup group = TrainingGroup.create(
+                new TrainingGroup.CreateTrainingGroup("Juniors", TRAINER, new AgeRange(10, 18)));
+        when(trainingGroupRepository.findOne(TrainingGroupFilter.all().withMemberIs(TRAINER_2)))
+                .thenReturn(Optional.of(group));
+
+        assertThat(service.findTrainingGroupOfMember(TRAINER_2)).contains(group);
     }
 
     @Nested
@@ -358,7 +370,21 @@ class TrainingGroupManagementServiceTest {
         }
 
         @Test
-        @DisplayName("7.4 automatic assignEligibleMember path during createTrainingGroup is NOT checked — auto-assign still runs without exclusivity guard")
+        @DisplayName("7.4 should reject adding a trainer of this very group as its trainee")
+        void shouldRejectTrainerOfThisGroup() {
+            TrainingGroup targetGroup = TrainingGroup.reconstruct(
+                    GROUP_ID, "Juniors", Set.of(TRAINER, MEMBER), Set.of(), new AgeRange(10, 18), null);
+
+            when(trainingGroupRepository.findOne(any(TrainingGroupFilter.class))).thenReturn(Optional.empty());
+            when(trainingGroupRepository.findById(GROUP_ID)).thenReturn(Optional.of(targetGroup));
+
+            assertThatThrownBy(() -> service.addMemberToTrainingGroup(GROUP_ID, MEMBER))
+                    .isInstanceOf(OwnerCannotBeMemberException.class);
+            verify(trainingGroupRepository, never()).save(any(TrainingGroup.class));
+        }
+
+        @Test
+        @DisplayName("7.5 automatic assignEligibleMember path during createTrainingGroup is NOT checked — auto-assign still runs without exclusivity guard")
         void shouldNotApplyExclusivityCheckOnAutoAssignPath() {
             // Auto-assign path: createTrainingGroup calls assignEligibleMember in a loop, not addMemberToTrainingGroup.
             // findGroupForMember must NOT be called during createTrainingGroup.

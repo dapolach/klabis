@@ -11,6 +11,7 @@ import com.klabis.common.users.domain.*;
 import com.klabis.common.users.domain.PasswordSetupTokenRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,6 +33,7 @@ class PasswordSetupServiceImpl implements PasswordSetupService {
     private final PasswordEncoder passwordEncoder;
     private final PasswordComplexityValidator passwordValidator;
     private final PerKeyRateLimiter rateLimiter;
+    private final ObjectProvider<ActivationContactVerifier> activationContactVerifier;
     private final PasswordSetupProperties passwordSetupProperties;
     private final ClubProperties clubProperties;
 
@@ -43,6 +45,7 @@ class PasswordSetupServiceImpl implements PasswordSetupService {
             PasswordEncoder passwordEncoder,
             PasswordComplexityValidator passwordValidator,
             PerKeyRateLimiter rateLimiter,
+            ObjectProvider<ActivationContactVerifier> activationContactVerifier,
             PasswordSetupProperties passwordSetupProperties,
             ClubProperties clubProperties) {
         this.tokenRepository = tokenRepository;
@@ -52,6 +55,7 @@ class PasswordSetupServiceImpl implements PasswordSetupService {
         this.passwordEncoder = passwordEncoder;
         this.passwordValidator = passwordValidator;
         this.rateLimiter = rateLimiter;
+        this.activationContactVerifier = activationContactVerifier;
         this.passwordSetupProperties = passwordSetupProperties;
         this.clubProperties = clubProperties;
     }
@@ -171,6 +175,19 @@ class PasswordSetupServiceImpl implements PasswordSetupService {
             throw new TokenValidationException(
                     "Account is not in pending activation status. Token reissuance is only available for accounts awaiting activation."
             );
+        }
+
+        ActivationContactVerifier verifier = activationContactVerifier.getIfAvailable();
+        // Fail closed: a module bootstrapped without the members adapter (e.g. isolated
+        // module tests) has no verifier bean. Treat that exactly like "no match" rather
+        // than sending a link nobody could actually confirm ownership of.
+        boolean isActivationContact = verifier != null && verifier.isActivationContact(user.getId(), email);
+
+        if (!isActivationContact) {
+            // Neutral outcome by design (D1): never reveal whether the address matched,
+            // so the form cannot be used to enumerate members' e-mail addresses.
+            log.warn("Activation e-mail not sent for user {} ({}): the entered e-mail is not an activation contact of this account (e-mail mismatch, or the account holder cannot self-activate, e.g. a minor)", user.getId(), registrationNumber);
+            return;
         }
 
         GeneratedTokenResult result = generateToken(user);

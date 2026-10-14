@@ -4,7 +4,11 @@ import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Carries the domain object(s) behind a plain payload DTO returned by a controller method,
@@ -20,6 +24,8 @@ public final class HalResponseContext {
     private static final String SINGLE_DOMAIN_ATTR = HalResponseContext.class.getName() + ".singleDomain";
     private static final String DOMAIN_LIST_ATTR = HalResponseContext.class.getName() + ".domainList";
     private static final String EMBEDDED_ATTR = HalResponseContext.class.getName() + ".embedded";
+    private static final String MARK_HAL_RESOURCE_ATTR = HalResponseContext.class.getName() + ".markHalResource";
+    private static final String CONTEXT_MAP_ATTR = HalResponseContext.class.getName() + ".contextMap";
 
     private HalResponseContext() {
     }
@@ -32,6 +38,19 @@ public final class HalResponseContext {
     }
 
     /**
+     * Requests HAL wrapping for a single-item payload that has no domain object behind it (e.g. the
+     * empty {@code RootModel} / {@code DashboardModel} markers), so postprocessors on
+     * {@code EntityModel<X>} still run. Honoured only when a HAL media type is selected.
+     */
+    public static void markHalResource() {
+        setAttribute(MARK_HAL_RESOURCE_ATTR, Boolean.TRUE);
+    }
+
+    static boolean takeHalResourceMark() {
+        return takeAttribute(MARK_HAL_RESOURCE_ATTR) != null;
+    }
+
+    /**
      * Registers the domain objects backing a collection response, in the same order as the
      * DTO list returned by the controller — the advice pairs them 1:1 by index.
      */
@@ -41,13 +60,15 @@ public final class HalResponseContext {
 
     /**
      * Registers a collection to be rendered under {@code _embedded} next to a single-item payload,
-     * for endpoints whose response carries a second, independently-shaped collection.
+     * for endpoints whose response carries a second, independently-shaped collection. The collection
+     * is only built when the advice actually renders a HAL envelope; a pass-through (non-HAL) response
+     * never invokes the supplier.
      * <p>
-     * Declared here rather than in a postprocessor because the data usually needs a port the
-     * controller already holds, and because the postprocessor for a given payload type may be shared
-     * with a *list* endpoint that has no such collection (as {@code MembershipFeeGroupResponse} is).
-     * The {@code _embedded} block itself is assembled by {@link HalResponseBodyAdvice} after the
-     * postprocessors have run, so it lands alongside {@code _links} and {@code _templates}.
+     * Declared here rather than in a postprocessor because the postprocessor for a given payload type
+     * may be shared with a *list* endpoint that has no such collection (as
+     * {@code MembershipFeeGroupResponse} is). The {@code _embedded} block itself is assembled by
+     * {@link HalResponseBodyAdvice} after the postprocessors have run, so it lands alongside
+     * {@code _links} and {@code _templates}.
      * <p>
      * One collection per response: a second call replaces the first. Both current callers embed
      * exactly one, and supporting several would mean deciding how their relations compose inside the
@@ -56,15 +77,37 @@ public final class HalResponseContext {
      * @param itemType fallback element type, so an empty collection still renders under the correct
      *                 relation instead of being dropped
      */
-    public static void embed(Collection<?> collection, Class<?> itemType) {
-        setAttribute(EMBEDDED_ATTR, new Embedded(collection, itemType));
+    public static void embedDeferred(Supplier<Collection<?>> collectionSupplier, Class<?> itemType) {
+        setAttribute(EMBEDDED_ATTR, new DeferredEmbedded(collectionSupplier, itemType));
     }
 
     static Embedded takeEmbedded() {
-        return (Embedded) takeAttribute(EMBEDDED_ATTR);
+        DeferredEmbedded deferred = (DeferredEmbedded) takeAttribute(EMBEDDED_ATTR);
+        return deferred == null ? null : new Embedded(deferred.supplier().get(), deferred.itemType());
     }
 
     record Embedded(Collection<?> collection, Class<?> itemType) {
+    }
+
+    private record DeferredEmbedded(Supplier<Collection<?>> supplier, Class<?> itemType) {
+    }
+
+    private static final class Deferred {
+        private final Supplier<?> supplier;
+        private boolean resolved;
+        private Object value;
+
+        Deferred(Supplier<?> supplier) {
+            this.supplier = supplier;
+        }
+
+        Object get() {
+            if (!resolved) {
+                value = supplier.get();
+                resolved = true;
+            }
+            return value;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -77,10 +120,110 @@ public final class HalResponseContext {
         return (List<D>) takeAttribute(DOMAIN_LIST_ATTR);
     }
 
+    /**
+     * Publishes an arbitrary value for a postprocessor to read back, keyed by its runtime class.
+     * The type token is the key, so producer and consumer are linked by the compiler rather than
+     * by a shared string. A second value of the same class replaces the first; values of different
+     * classes coexist. No-op when no request attributes are bound.
+     */
+    public static void setContext(Object value) {
+        Map<Class<?>, Object> map = contextMap(true);
+        if (map != null) {
+            map.put(value.getClass(), value);
+        }
+    }
+
+    /**
+     * Publishes a value that is computed only when first read, keyed by {@code type} (the declared
+     * class, so lookups and ambiguity checks work without invoking the supplier). The supplier runs
+     * at most once per request; its result is memoized, including a {@code null} result. If nothing
+     * ever reads it (e.g. a non-HAL response), it never runs. A later registration for the same
+     * {@code type} replaces this one. No-op when no request attributes are bound.
+     */
+    public static <T> void setDeferredContext(Class<T> type, Supplier<? extends T> supplier) {
+        Map<Class<?>, Object> map = contextMap(true);
+        if (map != null) {
+            map.put(type, new Deferred(supplier));
+        }
+    }
+
+    /**
+     * Resolves a published value by assignability: returns a stored value whose runtime class is
+     * assignable to {@code type}, so it can be read through an interface or supertype. Empty when
+     * nothing matches or no request is bound.
+     * <p>
+     * <strong>Does not consume.</strong> Unlike {@link #takeDomain()} and friends, the value stays
+     * in the map so it can be read again.
+     *
+     * @throws IllegalStateException if two stored values are both assignable to {@code type} —
+     *                               picking one would depend on map iteration order
+     */
+    public static <T> Optional<T> findContext(Class<T> type) {
+        Map<Class<?>, Object> map = contextMap(false);
+        if (map == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(resolve(map, type));
+    }
+
+    /**
+     * Same assignability lookup as {@link #findContext(Class)}, for a caller that declares the value
+     * mandatory.
+     * <p>
+     * <strong>Does not consume.</strong> The value stays in the map so it can be read again.
+     *
+     * @throws IllegalStateException if nothing is stored for {@code type}, or if two stored values
+     *                               are both assignable to it
+     */
+    public static <T> T getContext(Class<T> type) {
+        Map<Class<?>, Object> map = contextMap(false);
+        T value = map == null ? null : resolve(map, type);
+        if (value == null) {
+            throw new IllegalStateException("HalResponseContext has nothing stored for " + type.getName());
+        }
+        return value;
+    }
+
+    private static <T> T resolve(Map<Class<?>, Object> map, Class<T> type) {
+        Class<?> match = null;
+        for (Class<?> storedType : map.keySet()) {
+            if (type.isAssignableFrom(storedType)) {
+                if (match != null) {
+                    throw new IllegalStateException(
+                            "HalResponseContext has an ambiguous match for " + type.getName() + ": both "
+                                    + match.getName() + " and " + storedType.getName());
+                }
+                match = storedType;
+            }
+        }
+        if (match == null) {
+            return null;
+        }
+        Object stored = map.get(match);
+        return type.cast(stored instanceof Deferred deferred ? deferred.get() : stored);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<Class<?>, Object> contextMap(boolean createIfAbsent) {
+        ServletRequestAttributes attributes = currentAttributes();
+        if (attributes == null) {
+            return null;
+        }
+        Map<Class<?>, Object> map =
+                (Map<Class<?>, Object>) attributes.getAttribute(CONTEXT_MAP_ATTR, ServletRequestAttributes.SCOPE_REQUEST);
+        if (map == null && createIfAbsent) {
+            map = new HashMap<>();
+            attributes.setAttribute(CONTEXT_MAP_ATTR, map, ServletRequestAttributes.SCOPE_REQUEST);
+        }
+        return map;
+    }
+
     static void clear() {
         takeAttribute(SINGLE_DOMAIN_ATTR);
         takeAttribute(DOMAIN_LIST_ATTR);
         takeAttribute(EMBEDDED_ATTR);
+        takeAttribute(MARK_HAL_RESOURCE_ATTR);
+        takeAttribute(CONTEXT_MAP_ATTR);
     }
 
     private static void setAttribute(String name, Object value) {

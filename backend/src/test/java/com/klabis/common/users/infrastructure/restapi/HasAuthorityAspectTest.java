@@ -1,5 +1,8 @@
 package com.klabis.common.users.infrastructure.restapi;
 
+import org.springframework.beans.factory.BeanFactory;
+import com.klabis.common.authorization.AuthorizationSnapshotProvider;
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.security.HasAuthorityMethodInterceptor;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.HasAuthority;
@@ -11,7 +14,9 @@ import org.springframework.aop.framework.autoproxy.DefaultAdvisorAutoProxyCreato
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.convert.ConversionService;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -274,8 +279,8 @@ class HasAuthorityAspectTest {
     static class HasAuthorityInterceptorTestConfiguration {
 
         @Bean
-        HasAuthorityMethodInterceptor testHasAuthorityMethodInterceptor() {
-            return new HasAuthorityMethodInterceptor();
+        HasAuthorityMethodInterceptor testHasAuthorityMethodInterceptor(BeanFactory beanFactory) {
+            return new HasAuthorityMethodInterceptor(beanFactory);
         }
 
         @Bean
@@ -283,6 +288,12 @@ class HasAuthorityAspectTest {
             DefaultAdvisorAutoProxyCreator creator = new DefaultAdvisorAutoProxyCreator();
             creator.setProxyTargetClass(true);
             return creator;
+        }
+
+        // not a candidate: this configuration is also picked up by full-context tests, which have their own evaluator
+        @Bean(autowireCandidate = false)
+        AuthorizationEvaluator hasAuthorityTestEvaluator(ObjectProvider<ConversionService> conversionService) {
+            return new AuthorizationEvaluator(new AuthorizationSnapshotProvider(), conversionService);
         }
 
         @Bean

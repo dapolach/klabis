@@ -3,6 +3,9 @@
 ## Project
 
 - [Shared HAL envelope base models](project_hal_shared_envelope_models.md) — bundler deriver composes EntityModel/CollectionModel/PagedModel from _shared/hal.yaml via allOf; markers keep flat shape
+- [Event aggregate signature growth](project_event_aggregate_signature_growth.md) — add fields to Event/EventRegistration factories via delegating overloads + non-canonical record constructor; ~60 positional call sites otherwise
+- [SyncEntityType addition (spec-first)](project_sync_entity_type_addition.md) — edit sync.yaml SyncEntityTypeParam enum, regen via openapiBundle+compileJava, then add domain SyncEntityType constant by hand
+- [Member sync projection mapping quirks](project_member_sync_projection.md) — si==0→null chip, blank→null, phone needs CZ-only E.164 normalization, Member.register() never sets chipNumber
 
 ## Project patterns confirmed
 
@@ -45,3 +48,7 @@
 - `FieldSecurityBeanSerializerModifier` + `SecuredBeanPropertyWriter` evaluate auth during Jackson serialization
 - `FieldSecurityJacksonModule` registered via `@JsonComponent` — auto-discovered in `@WebMvcTest` and `@SpringBootTest`
 - HAL+FORMS template filtering (`HalFormsSupport`) already reads the same record component annotations — no extra wiring needed
+- [Test snapshot infra for canInvoke](project_rebac2_test_snapshot_infra.md) — slice vs full-context snapshot providers; scanned nested configs pitfall
+- [Field security via evaluator](project_rebac2_field_security_evaluator.md) — serializer/advice/HAL-FORMS share evaluator; HalFormsSupport comes from KlabisWebMvcSliceConfiguration
+- [Authority list in templates](project_authority_list_mustache.md) — codegen renders full @HasAuthority text into x-klabis-authority-annotation; templates print verbatim
+- [HalFormsSupport static instance](project_halformssupport_static_instance.md) — fail-fast; listener for Spring tests, extension for plain tests

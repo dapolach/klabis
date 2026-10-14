@@ -3,6 +3,9 @@ package com.klabis.members.application;
 import com.klabis.common.users.UserId;
 import com.klabis.common.users.UserService;
 import com.klabis.members.domain.*;
+import com.klabis.members.legalguardian.application.LegalGuardianPort.GuardianInput;
+
+import java.util.List;
 
 /**
  * Service for member registration operations.
@@ -24,11 +27,29 @@ public interface RegistrationPort {
             Address address,
             EmailAddress email,
             PhoneNumber phone,
-            GuardianInformation guardian,
             BirthNumber birthNumber,
             BankAccountNumber bankAccountNumber,
-            UserId registeredBy
-    ) {}
+            UserId registeredBy,
+            List<GuardianInput> legalGuardians,
+            UserId takenOverLegalGuardian
+    ) {
+
+        public RegisterNewMember {
+            legalGuardians = legalGuardians == null ? List.of() : List.copyOf(legalGuardians);
+        }
+
+        public RegisterNewMember(
+                PersonalInformation personalInformation,
+                Address address,
+                EmailAddress email,
+                PhoneNumber phone,
+                BirthNumber birthNumber,
+                BankAccountNumber bankAccountNumber,
+                UserId registeredBy) {
+            this(personalInformation, address, email, phone, birthNumber, bankAccountNumber, registeredBy,
+                    List.of(), null);
+        }
+    }
 
     /**
      * Registers a new member.
@@ -48,9 +69,39 @@ public interface RegistrationPort {
      *
      * @param command the registration command containing member details (without ID and registration number)
      * @return the newly created Member aggregate
-     * @throws IllegalArgumentException if any required field is invalid
-     * @throws IllegalStateException    if Member ID != User ID after creation (invariant violation)
+     * @throws IllegalArgumentException              if any required field is invalid
+     * @throws IllegalStateException                 if Member ID != User ID after creation (invariant violation)
+     * @throws RegistrationNumberAlreadyInUseException if the generated number collides with one already in use
      */
     @org.springframework.transaction.annotation.Transactional
     Member registerMember(RegisterNewMember command);
+
+    /**
+     * Command for importing a member whose registration number was issued elsewhere (e.g. by ORIS).
+     * <p>
+     * Composes {@link RegisterNewMember} rather than adding an optional field to it, so the two
+     * cases - a number issued by the club versus one adopted from elsewhere - stay explicit at
+     * the type level.
+     *
+     * @param details            the ordinary registration details, exactly as for {@link #registerMember}
+     * @param registrationNumber the registration number to adopt instead of generating one
+     */
+    record ImportMember(RegisterNewMember details, RegistrationNumber registrationNumber) {}
+
+    /**
+     * Imports a member whose registration number was issued elsewhere, adopting it instead of
+     * generating one from the club's own sequence.
+     * <p>
+     * Converges onto the same registration path as {@link #registerMember} immediately after the
+     * registration number is decided, so every consequence of a normal registration - user
+     * creation, the shared-id invariant, validation and every published event - follows here too.
+     *
+     * @param command the import command, carrying both the registration details and the number to adopt
+     * @return the newly created Member aggregate
+     * @throws IllegalArgumentException              if any required field is invalid
+     * @throws IllegalStateException                 if Member ID != User ID after creation (invariant violation)
+     * @throws RegistrationNumberAlreadyInUseException if the given number is already carried by another member
+     */
+    @org.springframework.transaction.annotation.Transactional
+    Member importMember(ImportMember command);
 }

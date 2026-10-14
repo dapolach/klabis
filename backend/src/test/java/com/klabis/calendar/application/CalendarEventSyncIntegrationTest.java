@@ -1,6 +1,7 @@
 package com.klabis.calendar.application;
 
 import com.klabis.CleanupTestData;
+import com.klabis.KlabisModuleTest;
 import com.klabis.calendar.CalendarItemId;
 import com.klabis.calendar.CalendarItemKind;
 import com.klabis.calendar.domain.CalendarRepository;
@@ -18,9 +19,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Import;
-import org.springframework.modulith.test.ApplicationModuleTest;
 import org.springframework.modulith.test.Scenario;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.jdbc.Sql;
 import org.springframework.test.context.jdbc.SqlConfig;
@@ -49,8 +48,7 @@ import static org.mockito.Mockito.when;
  * - Description formatting (location + " - " + organizer + optional website URL)
  * - Idempotent behavior (no duplicate calendar items)
  */
-@ApplicationModuleTest(value = ApplicationModuleTest.BootstrapMode.STANDALONE)
-@ActiveProfiles("test")
+@KlabisModuleTest
 @CleanupTestData
 @Import(MemberIdMixin.class)
 @DisplayName("Calendar Event Synchronization Integration Tests")
@@ -87,7 +85,7 @@ class CalendarEventSyncIntegrationTest {
         ));
 
         // When & Then: CalendarItem should be created automatically
-        scenario.publish(EventPublishedEvent.fromAggregate(Event.reconstruct(eventId, "Spring Boot Workshop", LocalDate.of(2024, 3, 15), "Prague CC", "OOB", WebsiteUrl.of("https://example.com/workshop"), null, null, null, EventStatus.ACTIVE, null, null, List.of(), null, null, List.of(), null)))
+        scenario.publish(EventPublishedEvent.fromAggregate(Event.reconstruct(eventId, "Spring Boot Workshop", LocalDate.of(2024, 3, 15), "Prague CC", "OOB", WebsiteUrl.of("https://example.com/workshop"), null, null, null, EventStatus.ACTIVE, null, List.of(), null, null, List.of(), null)))
                 .andWaitForStateChange(() -> !calendarRepository.findByEventId(eventId).isEmpty())
                 .andVerify(isPresent -> {
                     EventCalendarItem calendarItem = calendarRepository.findByEventId(eventId).stream()
@@ -129,7 +127,8 @@ class CalendarEventSyncIntegrationTest {
                         "NewOrg",
                         WebsiteUrl.of("https://new-url.com"),
                         java.util.List.of(),
-                        java.time.Instant.now()
+                        java.time.Instant.now(),
+                        UpdateOrigin.MANUAL
                 ))
                 .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).stream()
                                 .filter(EventCalendarItem.class::isInstance)
@@ -157,7 +156,7 @@ class CalendarEventSyncIntegrationTest {
                 .findFirst().orElseThrow().getId();
 
         // When: Event is cancelled
-        scenario.publish(EventCancelledEvent.fromAggregate(Event.reconstruct(eventId, "Test", LocalDate.now(), "Location", "OOB", null, null, null, null, EventStatus.CANCELLED, null, null, List.of(), null, null, List.of(), null)))
+        scenario.publish(EventCancelledEvent.fromAggregate(Event.reconstruct(eventId, "Test", LocalDate.now(), "Location", "OOB", null, null, null, null, EventStatus.CANCELLED, null, List.of(), null, null, List.of(), null)))
                 .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).isEmpty())
                 .andVerify(calendarItemIsGone -> {
                     assertThat(calendarRepository.findById(calendarItemId)).isEmpty();
@@ -188,7 +187,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(EventPublishedEvent.fromAggregate(Event.reconstruct(
                             eventId, "Jarní sprint", EVENT_DATE, "Les Brdy", "OOB",
-                            null, null, null, null, EventStatus.ACTIVE, null, null, List.of(), null, null, List.of(), null)))
+                            null, null, null, null, EventStatus.ACTIVE, null, List.of(), null, null, List.of(), null)))
                     .andWaitForStateChange(() -> !calendarRepository.findByEventId(eventId).isEmpty())
                     .andVerify(ignored -> {
                         List<EventCalendarItem> items = findEventItems(eventId);
@@ -214,7 +213,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(EventPublishedEvent.fromAggregate(Event.reconstruct(
                             eventId, "Jarní sprint", EVENT_DATE, "Les Brdy", "OOB",
-                            null, null, null, RegistrationDeadlines.single(DEADLINE_DATE), EventStatus.ACTIVE, null, null, List.of(), null, null, List.of(), null)))
+                            null, null, null, RegistrationDeadlines.single(DEADLINE_DATE), EventStatus.ACTIVE, null, List.of(), null, null, List.of(), null)))
                     .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).size() >= 2)
                     .andVerify(ignored -> {
                         List<EventCalendarItem> items = findEventItems(eventId);
@@ -245,7 +244,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(new EventUpdatedEvent(
                             UUID.randomUUID(), eventId, "Jarní sprint", EVENT_DATE,
-                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now()))
+                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now(), UpdateOrigin.MANUAL))
                     .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).size() >= 2)
                     .andVerify(ignored -> {
                         List<EventCalendarItem> items = findEventItems(eventId);
@@ -291,7 +290,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(new EventUpdatedEvent(
                             UUID.randomUUID(), eventId, "Jarní sprint", EVENT_DATE,
-                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now()))
+                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now(), UpdateOrigin.MANUAL))
                     .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).size() == 1)
                     .andVerify(ignored -> {
                         List<EventCalendarItem> items = findEventItems(eventId);
@@ -325,7 +324,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(new EventUpdatedEvent(
                             UUID.randomUUID(), eventId, newName, EVENT_DATE,
-                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now()))
+                            "Les Brdy", "OOB", null, List.of(), java.time.Instant.now(), UpdateOrigin.MANUAL))
                     .andWaitForStateChange(() -> {
                         List<EventCalendarItem> items = findEventItems(eventId);
                         return items.stream().anyMatch(i -> i.getKind() == CalendarItemKind.EVENT_DATE
@@ -363,7 +362,7 @@ class CalendarEventSyncIntegrationTest {
 
             scenario.publish(EventCancelledEvent.fromAggregate(Event.reconstruct(
                             eventId, "Jarní sprint", EVENT_DATE, "Les Brdy", "OOB",
-                            null, null, null, null, EventStatus.CANCELLED, null, null, List.of(), null, null, List.of(), null)))
+                            null, null, null, null, EventStatus.CANCELLED, null, List.of(), null, null, List.of(), null)))
                     .andWaitForStateChange(() -> calendarRepository.findByEventId(eventId).isEmpty())
                     .andVerify(ignored -> assertThat(calendarRepository.findByEventId(eventId)).isEmpty());
         }

@@ -1,17 +1,16 @@
 package com.klabis.membershipfees.infrastructure.restapi;
 
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.mvc.MvcComponent;
-import com.klabis.common.security.fieldsecurity.SecuritySpelEvaluator;
-import com.klabis.common.ui.HalFormsInlineOption;
+import com.klabis.common.ui.HalFormsOptionsDef;
 import com.klabis.common.ui.HalResponseContext;
 import com.klabis.common.ui.ModelWithDomainPostprocessor;
 import com.klabis.common.ui.RootModel;
 import com.klabis.common.users.Authority;
 import com.klabis.membershipfees.MembershipFeeTierId;
-import com.klabis.membershipfees.application.EventTypeOptionsPort;
 import com.klabis.membershipfees.application.FeeSelectionCampaignManagementPort;
 import com.klabis.membershipfees.application.MembershipFeeTierManagementPort;
-import com.klabis.membershipfees.application.RankingOptionsPort;
+import com.klabis.membershipfees.application.MembershipFeeTierOptionsPort;
 import com.klabis.membershipfees.domain.*;
 import org.jmolecules.architecture.hexagonal.PrimaryAdapter;
 import org.springframework.core.convert.ConversionService;
@@ -21,8 +20,6 @@ import org.springframework.hateoas.MediaTypes;
 import org.springframework.hateoas.server.ExposesResourceFor;
 import org.springframework.hateoas.server.RepresentationModelProcessor;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -42,9 +39,6 @@ import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.methodOn;
 class MembershipFeeTierController implements MembershipFeeTiersApi {
 
     private final MembershipFeeTierManagementPort managementPort;
-    private final RankingOptionsPort rankingOptionsPort;
-    private final EventTypeOptionsPort eventTypeOptionsPort;
-    private final FeeSelectionCampaignManagementPort campaignManagementPort;
     private final ConversionService conversionService;
     // toSummaryResponse is a plain interface method (not the Converter.convert override), so it
     // isn't reachable via ConversionService.convert(source, TargetClass) — that only dispatches
@@ -52,15 +46,9 @@ class MembershipFeeTierController implements MembershipFeeTiersApi {
     private final MembershipFeeTierResponseConverter tierResponseConverter;
 
     MembershipFeeTierController(MembershipFeeTierManagementPort managementPort,
-                                RankingOptionsPort rankingOptionsPort,
-                                EventTypeOptionsPort eventTypeOptionsPort,
-                                FeeSelectionCampaignManagementPort campaignManagementPort,
                                 ConversionService conversionService,
                                 MembershipFeeTierResponseConverter tierResponseConverter) {
         this.managementPort = managementPort;
-        this.rankingOptionsPort = rankingOptionsPort;
-        this.eventTypeOptionsPort = eventTypeOptionsPort;
-        this.campaignManagementPort = campaignManagementPort;
         this.conversionService = conversionService;
         this.tierResponseConverter = tierResponseConverter;
     }
@@ -81,21 +69,8 @@ class MembershipFeeTierController implements MembershipFeeTiersApi {
                 .map(tierResponseConverter::toSummaryResponse)
                 .toList();
 
-        // isAdmin() gate mirrors the original controller's behaviour: the extra links are only
-        // computed (and campaignManagementPort queried) for callers with MEMBERS:MANAGE.
-        Optional<FeeSelectionCampaign> activeCampaign = isAdmin()
-                ? campaignManagementPort.findActiveCampaign()
-                : Optional.empty();
-        MembershipFeeTierListPostprocessor.setActiveCampaign(activeCampaign);
-
         HalResponseContext.setDomainList(tiers);
         return ResponseEntity.ok(items);
-    }
-
-    private boolean isAdmin() {
-        return SecuritySpelEvaluator.hasAuthority(
-                SecurityContextHolder.getContext().getAuthentication(),
-                Authority.MEMBERS_MANAGE);
     }
 
     @Override
@@ -126,8 +101,6 @@ class MembershipFeeTierController implements MembershipFeeTiersApi {
                 .map(d -> MembershipFeesResponseMapper.toResponse(d.rule()))
                 .toList();
 
-        MembershipFeeTierListRulesPostprocessor.setOptions(
-                rankingOptionsPort.listRankingOptions(), eventTypeOptionsPort.listEventTypeOptions());
         HalResponseContext.setDomainList(domains);
         return ResponseEntity.ok(items);
     }
@@ -235,50 +208,31 @@ class MembershipFeeTierDetailsPostprocessor
     }
 }
 
-// The active campaign is looked up by the controller (which already holds
-// FeeSelectionCampaignManagementPort) and handed over via a request attribute, rather than
-// injecting the port here — @MvcComponent beans are discovered by @WebMvcTest's global component
-// scan regardless of the controllers under test (see backend-patterns skill), so adding a new
-// port dependency here would break every unrelated @WebMvcTest slice in the app unless each one
-// also mocked it.
 @MvcComponent
 class MembershipFeeTierListPostprocessor
         implements RepresentationModelProcessor<org.springframework.hateoas.CollectionModel<EntityModel<MembershipFeeTierSummaryResponse>>> {
 
-    private static final String ACTIVE_CAMPAIGN_ATTR = MembershipFeeTierListPostprocessor.class.getName() + ".activeCampaign";
+    private final AuthorizationEvaluator authorizationEvaluator;
+    private final FeeSelectionCampaignManagementPort campaignManagementPort;
 
-    static void setActiveCampaign(Optional<FeeSelectionCampaign> activeCampaign) {
-        org.springframework.web.context.request.RequestAttributes attrs =
-                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
-        if (attrs != null) {
-            attrs.setAttribute(ACTIVE_CAMPAIGN_ATTR, activeCampaign,
-                    org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
-        }
+    MembershipFeeTierListPostprocessor(AuthorizationEvaluator authorizationEvaluator,
+                                       FeeSelectionCampaignManagementPort campaignManagementPort) {
+        this.authorizationEvaluator = authorizationEvaluator;
+        this.campaignManagementPort = campaignManagementPort;
     }
 
     @Override
     public org.springframework.hateoas.CollectionModel<EntityModel<MembershipFeeTierSummaryResponse>> process(
             org.springframework.hateoas.CollectionModel<EntityModel<MembershipFeeTierSummaryResponse>> model) {
-        // The activeCampaign attribute is what carries listTiers()'s campaign state here; the model
-        // itself cannot.
-        //
-        // The early return is defensive, not a live path: listTiers() is the only producer of this
-        // collection type and always sets the attribute, and this is NOT a type-dispatch guard —
-        // RepresentationModelProcessorInvoker resolves the full generic signature, so this processor
-        // never sees another endpoint's CollectionModel<EntityModel<Y>>. It earns its keep only if a
-        // second producer of this type appears, or the processor runs outside a request.
-        Optional<Optional<FeeSelectionCampaign>> activeCampaignAttr = currentActiveCampaignAttr();
-        if (activeCampaignAttr.isEmpty()) {
-            return model;
-        }
-
         model.mapLink(org.springframework.hateoas.IanaLinkRelations.SELF, selfLink -> (Link) selfLink
                 .andAffordances(klabisAfford(methodOn(FeeSelectionCampaignsApi.class).publishYear(null)))
                 .andAffordances(klabisAfford(methodOn(MembershipFeeTiersApi.class).createTier(null))));
 
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (SecuritySpelEvaluator.hasAuthority(auth, Authority.MEMBERS_MANAGE)) {
-            activeCampaignAttr.get().ifPresent(campaign ->
+        // getPublication/listPublications are readable by any authenticated caller; the campaign
+        // links are management navigation and are offered to managers only, so the campaign lookup
+        // is skipped for everyone else.
+        if (authorizationEvaluator.has(Authority.MEMBERS_MANAGE)) {
+            campaignManagementPort.findActiveCampaign().ifPresent(campaign ->
                     klabisLinkTo(methodOn(FeeSelectionCampaignsApi.class).getPublication(campaign.getId()
                             .value()))
                             .map(link -> link.withRel("activeCampaign"))
@@ -291,17 +245,6 @@ class MembershipFeeTierListPostprocessor
         return model;
     }
 
-    @SuppressWarnings("unchecked")
-    private static Optional<Optional<FeeSelectionCampaign>> currentActiveCampaignAttr() {
-        org.springframework.web.context.request.RequestAttributes attrs =
-                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
-        if (attrs == null) {
-            return Optional.empty();
-        }
-        Object value = attrs.getAttribute(ACTIVE_CAMPAIGN_ATTR,
-                org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
-        return value instanceof Optional<?> opt ? Optional.of((Optional<FeeSelectionCampaign>) opt) : Optional.empty();
-    }
 }
 
 @MvcComponent
@@ -323,7 +266,7 @@ class PaymentRuleDetailsPostprocessor
                                         eventTypeId,
                                         ranking,
                                         null),
-                                Map.of("ruleType", RULE_TYPE_OPTIONS)))
+                                Map.of("ruleType", HalFormsOptionsDef.values(RULE_TYPE_OPTIONS))))
                         .andAffordances(klabisAfford(
                                 methodOn(MembershipFeeTiersApi.class).removeRule(tierId, eventTypeId, ranking))))
                 .ifPresent(dtoModel::add);
@@ -334,39 +277,27 @@ class PaymentRuleDetailsPostprocessor
 // The tier id is read off the current request's resolved @PathVariable map, since
 // CollectionModel<EntityModel<PaymentRuleResponse>> carries no reference back to the tier when the
 // list is empty. Same pattern as EventRegistrationController.RegistrationListPostprocessor.
-// The ranking/event-type inline options are computed by the controller (which already holds
-// RankingOptionsPort/EventTypeOptionsPort) and handed over via a request attribute — see the
-// comment on MembershipFeeTierListPostprocessor for why these ports are not injected here.
 @MvcComponent
 class MembershipFeeTierListRulesPostprocessor
         implements RepresentationModelProcessor<org.springframework.hateoas.CollectionModel<EntityModel<PaymentRuleResponse>>> {
 
-    private static final String OPTIONS_ATTR = MembershipFeeTierListRulesPostprocessor.class.getName() + ".options";
+    private final MembershipFeeTierOptionsPort optionsPort;
 
-    record RuleOptions(List<HalFormsInlineOption> rankingOptions, List<HalFormsInlineOption> eventTypeOptions) {
-    }
-
-    static void setOptions(List<HalFormsInlineOption> rankingOptions, List<HalFormsInlineOption> eventTypeOptions) {
-        org.springframework.web.context.request.RequestAttributes attrs =
-                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
-        if (attrs != null) {
-            attrs.setAttribute(OPTIONS_ATTR, new RuleOptions(rankingOptions, eventTypeOptions),
-                    org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
-        }
+    MembershipFeeTierListRulesPostprocessor(MembershipFeeTierOptionsPort optionsPort) {
+        this.optionsPort = optionsPort;
     }
 
     @Override
     public org.springframework.hateoas.CollectionModel<EntityModel<PaymentRuleResponse>> process(
             org.springframework.hateoas.CollectionModel<EntityModel<PaymentRuleResponse>> model) {
         Optional<UUID> tierId = currentTierId();
-        Optional<RuleOptions> options = currentOptions();
-        if (tierId.isPresent() && options.isPresent()) {
+        if (tierId.isPresent()) {
             model.mapLink(org.springframework.hateoas.IanaLinkRelations.SELF, link -> (Link) link
-                    .andAffordances(klabisAffordWithMixedOptions(
+                    .andAffordances(klabisAffordWithOptions(
                             methodOn(MembershipFeeTiersApi.class).addRule(tierId.get(), null),
-                            Map.of("ruleType", List.of("PERCENTAGE", "FIXED_AMOUNT")),
-                            Map.of("rankingShortName", options.get().rankingOptions(),
-                                    "eventTypeId", options.get().eventTypeOptions()))));
+                            Map.of("ruleType", HalFormsOptionsDef.values(List.of("PERCENTAGE", "FIXED_AMOUNT")),
+                                    "rankingShortName", new HalFormsOptionsDef.Inline(optionsPort.listRankingOptions()),
+                                    "eventTypeId", new HalFormsOptionsDef.Inline(optionsPort.listEventTypeOptions())))));
         }
         return model;
     }
@@ -386,26 +317,22 @@ class MembershipFeeTierListRulesPostprocessor
         Object id = pathVariables.get("id");
         return id != null ? Optional.of(UUID.fromString(id.toString())) : Optional.empty();
     }
-
-    private static Optional<RuleOptions> currentOptions() {
-        org.springframework.web.context.request.RequestAttributes attrs =
-                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
-        if (attrs == null) {
-            return Optional.empty();
-        }
-        Object value = attrs.getAttribute(OPTIONS_ATTR,
-                org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
-        return value instanceof RuleOptions ro ? Optional.of(ro) : Optional.empty();
-    }
 }
 
 @MvcComponent
 class MembershipFeesRootPostprocessor implements RepresentationModelProcessor<EntityModel<RootModel>> {
 
+    private final AuthorizationEvaluator authorizationEvaluator;
+
+    MembershipFeesRootPostprocessor(AuthorizationEvaluator authorizationEvaluator) {
+        this.authorizationEvaluator = authorizationEvaluator;
+    }
+
     @Override
     public EntityModel<RootModel> process(EntityModel<RootModel> model) {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (!SecuritySpelEvaluator.hasAuthority(auth, Authority.MEMBERS_MANAGE)) {
+        // listTiers is readable by any authenticated caller, but the navigation entry is an
+        // administration screen, so it is offered to managers only.
+        if (!authorizationEvaluator.has(Authority.MEMBERS_MANAGE)) {
             return model;
         }
         klabisLinkTo(methodOn(MembershipFeeTiersApi.class).listTiers())

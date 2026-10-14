@@ -1,6 +1,9 @@
 # Members module — the API surface of MemberController plus registerMember (RegistrationController),
 # which is exposed as an affordance on the member collection.
 #
+# Legal guardian groups (LegalGuardianGroupController, /api/legal-guardian-groups) belong to the members module too: the
+# members module owns the guardian/minor relation (e.g. suspension blockers), so their API lives here.
+#
 # Endpoints living under /api/members/{memberId}/... that belong to other modules
 # (finance accounts, fee choices, fee summaries) are NOT part of this file.
 
@@ -38,7 +41,7 @@ paths:
       x-klabis-authority: MEMBERS_READ
       x-spring-paginated: true
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
       parameters:
         - $ref: './_shared/pagination.yaml#/components/parameters/PageParam'
         - $ref: './_shared/pagination.yaml#/components/parameters/SizeParam'
@@ -55,6 +58,12 @@ paths:
           required: false
           schema:
             type: string
+        - name: incomplete
+          in: query
+          description: 'When true, restricts results to members with incomplete data. Ignored for callers without MEMBERS:MANAGE.'
+          required: false
+          schema:
+            type: boolean
       responses:
         '200':
           description: Paginated list of members retrieved successfully
@@ -82,6 +91,11 @@ paths:
             registerMember:
               operation: registerMember
               description: Present only for callers with MEMBERS:MANAGE
+            importFromOris:
+              operation: importFromOris
+              description: |
+                Present only for callers with SYNC:MANAGE and only while a club key is held —
+                without one the action could not do anything (design.md D11).
         '400':
           $ref: './_shared/responses.yaml#/components/responses/BadRequest'
         '401':
@@ -100,8 +114,7 @@ paths:
       tags: [Registration]
       summary: Register a new member
       description: |
-        Creates a new member with personal information, contact details, and optional guardian
-        information for minors. Generates a unique registration number in format XXXYYSS
+        Creates a new member with personal information and contact details. Generates a unique registration number in format XXXYYSS
         (club code, birth year, sequence).
 
         Responds with a Location header pointing at the created member. When the birth number is
@@ -111,7 +124,7 @@ paths:
         - KlabisAuth: [MEMBERS]
       x-klabis-authority: MEMBERS_MANAGE
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.common.users.UserId currentUserId'
+        - '@com.klabis.common.users.ActingUser com.klabis.common.users.UserId currentUserId'
       requestBody:
         required: true
         x-codegen-request-body-name: request
@@ -185,6 +198,30 @@ paths:
         '422':
           $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
 
+  /api/members/oris-import:
+    post:
+      operationId: importFromOris
+      tags: [Members]
+      summary: Run the ORIS member import once, by hand
+      description: |
+        Runs the same discovery work as the scheduled ORIS member discovery job immediately,
+        rather than waiting for its next run (design.md D11). Offered as an affordance on
+        listMembers only while a club key is held — without one the action could not do
+        anything. Running it repeatedly brings nobody in twice: an already-paired member is
+        skipped exactly as the scheduled job skips it.
+      security:
+        - KlabisAuth: [SYNC]
+      x-klabis-authority: SYNC_MANAGE
+      responses:
+        '204':
+          description: Import pass completed
+          content:
+            application/prs.hal-forms+json: {}
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+
   /api/members/{id}:
     get:
       operationId: getMember
@@ -193,12 +230,12 @@ paths:
       description: |
         Detailed member information. Which fields are present depends on the caller: fields marked
         with x-klabis-authority / x-klabis-owner-visible are omitted unless the caller holds
-        MEMBERS:MANAGE or is the member themselves.
+        MEMBERS:MANAGE or MEMBERS:EDIT_PROFILE over this member, or is the member themselves.
       security:
         - KlabisAuth: [MEMBERS]
       x-klabis-authority: MEMBERS_READ
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
       parameters:
         - $ref: '#/components/parameters/MemberIdParam'
       responses:
@@ -220,12 +257,24 @@ paths:
               description: Member's finance account (requires FINANCE:MANAGE or ownership)
             feeSummary:
               description: Membership fee summary for the current year
-            familyGroup:
-              description: Family group the member belongs to, when there is one
+            legalGuardianGroup:
+              description: Legal guardian group of a minor member, present only for callers with MEMBERS:MANAGE
+            legalGuardians:
+              operation: listLegalGuardianGroupGuardians
+              description: |
+                Legal guardians of a minor who belongs to a legal guardian group; present for callers with
+                MEMBERS:MANAGE, for the minor themself and for holders of MEMBERS:EDIT_PROFILE over a minor
+                of the group (the minor's legal guardians). Absent for adults and for minors without a group.
             trainingGroup:
               description: Training group the member belongs to, when there is one
             ical-token:
               description: Calendar subscription token — only on the caller's own detail
+            sync:
+              operation: getSyncState
+              description: |
+                Present when the member was brought in from ORIS and the caller has SYNC:MANAGE
+                (design.md D12) — the same authority getSyncState itself requires. Absent for a
+                member never paired with ORIS.
           x-hal-templates:
             updateMember:
               operation: updateMember
@@ -235,6 +284,14 @@ paths:
             resume:
               operation: resumeMember
               description: Present only while the member is suspended
+            setMemberLegalGuardians:
+              operation: setMemberLegalGuardians
+              description: Present only for a minor and for callers with MEMBERS:MANAGE
+            sendMemberAccountActivation:
+              operation: sendMemberAccountActivation
+              description: |
+                Present only for a minor with an own e-mail whose account still awaits activation and
+                for callers with MEMBERS:MANAGE
         '400':
           $ref: './_shared/responses.yaml#/components/responses/BadRequest'
         '401':
@@ -258,10 +315,9 @@ paths:
         Fields the caller is not authorized to change are rejected.
       security:
         - KlabisAuth: [MEMBERS]
-      x-klabis-authority: MEMBERS_MANAGE
-      x-klabis-owner-visible: true
+      x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
       parameters:
         - $ref: '#/components/parameters/MemberIdParam'
       requestBody:
@@ -302,7 +358,7 @@ paths:
         - KlabisAuth: [MEMBERS]
       x-klabis-authority: MEMBERS_MANAGE
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.common.users.UserId currentUserId'
+        - '@com.klabis.common.users.ActingUser com.klabis.common.users.UserId currentUserId'
       parameters:
         - $ref: '#/components/parameters/MemberIdParam'
       requestBody:
@@ -353,7 +409,7 @@ paths:
         - KlabisAuth: [MEMBERS]
       x-klabis-authority: MEMBERS_MANAGE
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.common.users.UserId currentUserId'
+        - '@com.klabis.common.users.ActingUser com.klabis.common.users.UserId currentUserId'
       parameters:
         - $ref: '#/components/parameters/MemberIdParam'
       responses:
@@ -361,6 +417,370 @@ paths:
           description: Membership resumed
           content:
             application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/members/{id}/account-activation:
+    post:
+      operationId: sendMemberAccountActivation
+      tags: [MemberAccountActivation]
+      summary: Send an activation link to a minor's own e-mail
+      description: |
+        Lets an administrator decide that a minor gets their own login: generates a password setup
+        token and sends the activation link to the minor's own e-mail. Refused unless the member is a
+        minor with an own e-mail and an account awaiting activation. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/MemberIdParam'
+      responses:
+        '204':
+          description: Activation link sent
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+
+  /api/members/{id}/legal-guardians:
+    put:
+      operationId: setMemberLegalGuardians
+      tags: [LegalGuardianGroups]
+      summary: Set the legal guardians of a minor
+      description: |
+        Replaces the complete list of legal guardians of a minor member. Each item is either an
+        existing guardian chosen by user id or a new non-member guardian entered in place; a new
+        guardian is created in the same transaction. The minor moves to the legal guardian group with
+        exactly these guardians (created when there is none); siblings keep their guardians. The list
+        must not be empty and the member must be younger than 18. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/MemberIdParam'
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetLegalGuardiansRequest'
+      responses:
+        '204':
+          description: Legal guardians set
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  # ---------------------------------------------------------------------------------------------
+  # LegalGuardianGroups (LegalGuardianGroupController, /api/legal-guardian-groups)
+  # Groups are created, merged and removed automatically as the guardians of minors change, so
+  # there is no create/delete endpoint.
+  # ---------------------------------------------------------------------------------------------
+
+  /api/legal-guardian-groups:
+    get:
+      operationId: listLegalGuardianGroups
+      tags: [LegalGuardianGroups]
+      summary: List all legal guardian groups
+      description: Returns all legal guardian groups ordered by name, each with its guardians and number of minors. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      responses:
+        '200':
+          description: List of legal guardian groups retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LegalGuardianGroupSummaryResponse'
+          x-hal-links:
+            self:
+              description: This collection
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/legal-guardian-groups/{id}:
+    get:
+      operationId: getLegalGuardianGroup
+      tags: [LegalGuardianGroups]
+      summary: Get legal guardian group details
+      description: |
+        Returns legal guardian group details including its minors with their own hypermedia links;
+        the guardians are behind the legalGuardians link. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/LegalGuardianGroupIdParam'
+      responses:
+        '200':
+          description: Legal guardian group found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalGuardianGroupResponse'
+          x-hal-links:
+            self:
+              description: This legal guardian group
+            collection:
+              operation: listLegalGuardianGroups
+              description: Back to the group list
+            legalGuardians:
+              operation: listLegalGuardianGroupGuardians
+              description: Guardians of the group
+          x-hal-templates:
+            setLegalGuardianGroupGuardians:
+              operation: setLegalGuardianGroupGuardians
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/legal-guardian-groups/{id}/guardians:
+    get:
+      operationId: listLegalGuardianGroupGuardians
+      tags: [LegalGuardianGroups]
+      summary: List the guardians of a legal guardian group
+      description: |
+        Guardians of the group with their contacts; each item links to the guardian's member detail
+        (member) or non-member profile (legalGuardian). Requires MEMBERS:MANAGE, being a minor of the
+        group, or holding MEMBERS:EDIT_PROFILE over a minor of the group.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-spring-provide-args:
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
+      parameters:
+        - $ref: '#/components/parameters/LegalGuardianGroupIdParam'
+      responses:
+        '200':
+          description: Guardians of the group retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LegalGuardianGroupGuardianResponse'
+          x-hal-links:
+            self:
+              description: This collection
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/legal-guardian-groups/{id}/legal-guardians:
+    put:
+      operationId: setLegalGuardianGroupGuardians
+      tags: [LegalGuardianGroups]
+      summary: Set the guardians of a legal guardian group
+      description: |
+        Replaces the complete set of guardians for all minors of the group. When another group already
+        has exactly this set of guardians, the minors join it and this group disappears. The set must
+        not be empty. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/LegalGuardianGroupIdParam'
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetLegalGuardiansRequest'
+      responses:
+        '204':
+          description: Guardians set
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  # ---------------------------------------------------------------------------------------------
+  # LegalGuardians (LegalGuardianController, /api/legal-guardians) - non-member legal guardians
+  # and the candidates offered when choosing guardians (/api/legal-guardian-options).
+  # A legal guardian is created together with the minor's guardians, not through a POST here.
+  # ---------------------------------------------------------------------------------------------
+
+  /api/legal-guardians/{userId}:
+    get:
+      operationId: getLegalGuardian
+      tags: [LegalGuardians]
+      summary: Get the profile of a non-member legal guardian
+      description: |
+        Profile of a non-member legal guardian including the login number (EXTnnnn). Visible to users
+        with MEMBERS:MANAGE and to the guardian themself.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      x-klabis-owner-visible: true
+      parameters:
+        - $ref: '#/components/parameters/LegalGuardianUserIdParam'
+      responses:
+        '200':
+          description: Legal guardian found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegalGuardianResponse'
+          x-hal-links:
+            self:
+              description: This legal guardian profile
+          x-hal-templates:
+            updateLegalGuardian:
+              operation: updateLegalGuardian
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+    patch:
+      operationId: updateLegalGuardian
+      tags: [LegalGuardians]
+      summary: Update the profile of a non-member legal guardian
+      description: |
+        Partial update - only the fields present in the request body are changed. E-mail and telephone
+        cannot be cleared. An e-mail that belongs to another legal guardian or to an adult member is
+        refused. Requires MEMBERS:MANAGE or being the guardian themself.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      x-klabis-owner-visible: true
+      parameters:
+        - $ref: '#/components/parameters/LegalGuardianUserIdParam'
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLegalGuardianRequest'
+      responses:
+        '204':
+          description: Legal guardian updated
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/legal-guardian-options:
+    get:
+      operationId: listLegalGuardianOptions
+      tags: [LegalGuardianOptions]
+      summary: List candidates for a legal guardian
+      description: |
+        Non-member legal guardians and active members aged 18 or more, each person once. The prompt
+        is the final display label: members carry their registration number and non-members their
+        e-mail so namesakes can be told apart. Requires MEMBERS:MANAGE.
+      security:
+        - KlabisAuth: [MEMBERS]
+      x-klabis-authority: MEMBERS_MANAGE
+      parameters:
+        - name: kind
+          in: query
+          description: Restricts the candidates to members or to non-member legal guardians; both when absent
+          required: false
+          schema:
+            $ref: '#/components/schemas/LegalGuardianKind'
+      responses:
+        '200':
+          description: Candidates retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LegalGuardianOptionResponse'
+            application/prs.hal-forms+json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LegalGuardianOptionResponse'
         '400':
           $ref: './_shared/responses.yaml#/components/responses/BadRequest'
         '401':
@@ -388,6 +808,7 @@ components:
             profile: display user profile information
             MEMBERS: Members
             EVENTS: Events
+            SYNC: Synchronisation
 
   parameters:
     MemberIdParam:
@@ -395,10 +816,10 @@ components:
       in: path
       description: Member UUID
       required: true
-      # Marks the owner for operations that declare x-klabis-owner-visible. Inert on its own:
-      # @OwnerId is only consulted for a method or field already marked @OwnerVisible, so the
-      # operations here that do not opt into ownership are unaffected.
-      x-klabis-owner-id: true
+      # Identifies the target member. Inert on its own: @TargetId is only consulted for a method
+      # marked @OwnerVisible or guarded by an authority held over specific targets, so the
+      # operations here that do neither are unaffected.
+      x-klabis-target-id: MEMBER
       schema:
         type: string
         format: uuid
@@ -416,6 +837,25 @@ components:
         items:
           type: string
 
+    LegalGuardianGroupIdParam:
+      name: id
+      in: path
+      required: true
+      description: Legal guardian group UUID
+      schema:
+        type: string
+        format: uuid
+
+    LegalGuardianUserIdParam:
+      name: userId
+      in: path
+      required: true
+      description: User UUID of the non-member legal guardian
+      x-klabis-target-id: MEMBER
+      schema:
+        type: string
+        format: uuid
+
   schemas:
 
     # --- Responses ---------------------------------------------------------
@@ -430,7 +870,7 @@ components:
         id:
           type: string
           format: uuid
-          x-klabis-owner-id: true
+          x-klabis-target-id: MEMBER
         registrationNumber:
           type: string
         firstName:
@@ -440,15 +880,15 @@ components:
         dateOfBirth:
           type: string
           format: date
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         nationality:
           type: string
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         gender:
           $ref: '#/components/schemas/Gender'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         email:
           type: string
@@ -456,47 +896,45 @@ components:
           type: string
         address:
           $ref: '#/components/schemas/AddressResponse'
-        guardian:
-          $ref: '#/components/schemas/GuardianDTO'
-          x-klabis-authority: MEMBERS_MANAGE
-          x-klabis-owner-visible: true
         active:
           type: boolean
+          x-klabis-authority: MEMBERS_MANAGE
+          description: Whether the member is active (visible to admins only)
         chipNumber:
           type: string
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         identityCard:
           $ref: '#/components/schemas/IdentityCardDto'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         medicalCourse:
           $ref: '#/components/schemas/MedicalCourseDto'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         trainerLicense:
           $ref: '#/components/schemas/TrainerLicenseDto'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         refereeLicense:
           $ref: '#/components/schemas/RefereeLicenseDto'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         drivingLicenseGroup:
           $ref: '#/components/schemas/DrivingLicenseGroup'
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         dietaryRestrictions:
           type: string
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         birthNumber:
           type: string
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         bankAccountNumber:
           type: string
-          x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
           x-klabis-owner-visible: true
         suspensionReason:
           $ref: '#/components/schemas/DeactivationReason'
@@ -511,6 +949,17 @@ components:
         suspensionNote:
           type: string
           x-klabis-authority: MEMBERS_MANAGE
+        missingData:
+          type: array
+          items:
+            $ref: '#/components/schemas/MissingDataItem'
+          x-klabis-authority: MEMBERS_MANAGE
+          description: Required details this member currently lacks (visible to admins only)
+
+    MissingDataItem:
+      type: string
+      description: A detail Klabis requires of a complete member that this member currently lacks.
+      enum: [EMAIL, PHONE, BIRTH_NUMBER, GUARDIAN, ADDRESS]
 
     MemberSummaryResponse:
       type: object
@@ -540,6 +989,10 @@ components:
           type: boolean
           x-klabis-authority: MEMBERS_MANAGE
           description: Whether the member is active (visible to admins only)
+        dataIncomplete:
+          type: boolean
+          x-klabis-authority: MEMBERS_MANAGE
+          description: Whether the member is missing required data (visible to admins only)
 
     MemberOptionResponse:
       type: object
@@ -558,8 +1011,14 @@ components:
 
     RegisterMemberRequest:
       type: object
-      description: Member registration request
-      required: [firstName, lastName, dateOfBirth, nationality, gender, email, phone, address]
+      description: |
+        Member registration request. Whether the member is a minor is derived from dateOfBirth.
+
+        An adult must give their own email and phone and no legalGuardians; an adult may take over
+        an existing non-member legal guardian by legalGuardianUserId. A minor needs at least one
+        entry in legalGuardians (existing by userId or a new guardian) and their own email and phone
+        are optional when a guardian provides them.
+      required: [firstName, lastName, dateOfBirth, nationality, gender, address]
       properties:
         firstName:
           type: string
@@ -590,24 +1049,20 @@ components:
           maxLength: 2
         gender:
           $ref: '#/components/schemas/Gender'
+          x-hal-input-type: Gender
         email:
           type: string
           format: email
-          x-klabis-not-blank: true
-          description: Email address
+          description: Email address; required for an adult
           example: jan.novak@example.com
           maxLength: 255
         phone:
           type: string
-          x-klabis-not-blank: true
-          description: Phone number in E.164 format
+          description: Phone number in E.164 format; required for an adult
           example: '+420777123456'
           pattern: '^\+[0-9\s]{7,20}$'
         address:
           $ref: '#/components/schemas/AddressRequest'
-        guardian:
-          $ref: '#/components/schemas/GuardianDTO'
-          description: Guardian information (required for minors under 18)
         birthNumber:
           type: string
           description: Birth number (rodné číslo) — Czech nationals only, format RRMMDD/XXXX or RRMMDDXXXX
@@ -617,6 +1072,16 @@ components:
           description: Bank account number (IBAN or domestic Czech format)
           example: CZ6508000000192000145399
           maxLength: 50
+        legalGuardians:
+          type: array
+          description: Legal guardians of a minor; must be empty for an adult
+          items:
+            $ref: '#/components/schemas/LegalGuardianInputRequest'
+        legalGuardianUserId:
+          type: string
+          format: uuid
+          description: Existing non-member legal guardian to take over as the new adult member (keeps their user account)
+          x-hal-input-type: UserId
 
     UpdateMemberRequest:
       type: object
@@ -626,8 +1091,9 @@ components:
 
         Clearing a field the domain requires is rejected. firstName, lastName, dateOfBirth and
         gender have no cleared state, so a null there is treated as "leave alone". An explicit null
-        is refused for email or phone unless a guardian still covers that contact, for guardian
-        when the member is a minor, and for birthNumber when the member is a Czech national.
+        is refused for email or phone unless a legal guardian of a minor still covers that contact, and
+        for birthNumber when the member is a Czech national. Legal guardians are not part of this
+        request; they are set through setMemberLegalGuardians.
       # Properties are inlined rather than sharing named wrapper schemas: seven of them are plain
       # strings with different constraints (email 255, chipNumber 50 + digits, firstName 100), and a
       # shared schema can only carry one set.
@@ -639,23 +1105,25 @@ components:
           type: ['string', 'null']
           maxLength: 50
         address:
-          oneOf:
-            - $ref: '#/components/schemas/AddressRequest'
-            - type: 'null'
+          $ref: '#/components/schemas/AddressRequest'
+          x-klabis-nullable: true
         firstName:
           type: ['string', 'null']
           maxLength: 100
           x-klabis-not-blank: true
           x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-read-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
         lastName:
           type: ['string', 'null']
           maxLength: 100
           x-klabis-not-blank: true
           x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-read-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
         dateOfBirth:
           type: ['string', 'null']
           format: date
           x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-read-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
         # gender re-declares the Gender enum inline instead of $ref-ing it. Both composition
         # keywords are unusable here: oneOf/allOf strip property-level vendor extensions, and an
         # allOf that keeps x-klabis-authority still generates a bare `Gender`, not
@@ -668,6 +1136,8 @@ components:
           type: ['string', 'null']
           enum: ['MALE', 'FEMALE', null]
           x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-read-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
+          x-hal-input-type: Gender
         chipNumber:
           type: ['string', 'null']
           maxLength: 50
@@ -677,38 +1147,31 @@ components:
           minLength: 2
           maxLength: 2
         identityCard:
-          oneOf:
-            - $ref: '#/components/schemas/IdentityCardDto'
-            - type: 'null'
+          $ref: '#/components/schemas/IdentityCardDto'
+          x-klabis-nullable: true
         medicalCourse:
-          oneOf:
-            - $ref: '#/components/schemas/MedicalCourseDto'
-            - type: 'null'
+          $ref: '#/components/schemas/MedicalCourseDto'
+          x-klabis-nullable: true
         trainerLicense:
-          oneOf:
-            - $ref: '#/components/schemas/TrainerLicenseDto'
-            - type: 'null'
+          $ref: '#/components/schemas/TrainerLicenseDto'
+          x-klabis-nullable: true
         refereeLicense:
-          oneOf:
-            - $ref: '#/components/schemas/RefereeLicenseDto'
-            - type: 'null'
+          $ref: '#/components/schemas/RefereeLicenseDto'
+          x-klabis-nullable: true
         drivingLicenseGroup:
-          oneOf:
-            - $ref: '#/components/schemas/DrivingLicenseGroup'
-            - type: 'null'
+          $ref: '#/components/schemas/DrivingLicenseGroup'
+          x-klabis-nullable: true
+          x-hal-input-type: DrivingLicenseGroup
         dietaryRestrictions:
           type: ['string', 'null']
           maxLength: 500
         birthNumber:
           type: ['string', 'null']
           x-klabis-authority: MEMBERS_MANAGE
+          x-klabis-read-authority: [MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]
         bankAccountNumber:
           type: ['string', 'null']
           maxLength: 50
-        guardian:
-          oneOf:
-            - $ref: '#/components/schemas/GuardianDTO'
-            - type: 'null'
 
     SuspendMembershipRequest:
       type: object
@@ -717,6 +1180,7 @@ components:
       properties:
         reason:
           $ref: '#/components/schemas/DeactivationReason'
+          x-hal-input-type: DeactivationReason
         note:
           type: string
           maxLength: 500
@@ -773,7 +1237,7 @@ components:
           type: string
         groupType:
           type: string
-          enum: [FREE, FAMILY, TRAINING]
+          enum: [FREE, LEGAL_GUARDIAN, TRAINING]
           description: Which of the three group aggregates the member owns
 
     MonetaryAmount:
@@ -827,44 +1291,6 @@ components:
           # Kept in sync with Address.ISO_3166_ALPHA_2_PATTERN.
           pattern: '^[A-Za-z]{2}$'
 
-    GuardianDTO:
-      type: object
-      description: Guardian information for minors
-      required: [firstName, lastName, relationship, email, phone]
-      properties:
-        # minLength: 1 is what makes these reject an empty string. `required` only means the key
-        # must be present, so it generates @NotNull — which happily accepts "".
-        firstName:
-          type: string
-          description: Guardian's first name
-          example: Pavel
-          minLength: 1
-          maxLength: 100
-        lastName:
-          type: string
-          description: Guardian's last name
-          example: Novák
-          minLength: 1
-          maxLength: 100
-        relationship:
-          type: string
-          description: Relationship to member (e.g., PARENT, LEGAL_GUARDIAN)
-          example: PARENT
-          minLength: 1
-          maxLength: 50
-        email:
-          type: string
-          format: email
-          description: Guardian's email address
-          example: pavel.novak@example.com
-          minLength: 1
-        phone:
-          type: string
-          description: Guardian's phone number
-          example: '+420987654321'
-          minLength: 1
-          pattern: '^\+?[0-9\s\-()]{7,20}$'
-
     IdentityCardDto:
       type: object
       properties:
@@ -915,5 +1341,200 @@ components:
 
     DrivingLicenseGroup:
       type: string
-      enum: [B, BE, C, C1, D, D1, T, AM, A1, A2, A]
+      enum: [AM, A1, A2, A, B, BE, C, C1, D, D1, T]
 
+    # === LegalGuardianGroups ============================================================================
+
+    SetLegalGuardiansRequest:
+      type: object
+      description: Complete list of legal guardians. Must not be empty.
+      required: [legalGuardians]
+      properties:
+        legalGuardians:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/LegalGuardianInputRequest'
+
+    LegalGuardianInputRequest:
+      type: object
+      description: |
+        A legal guardian: either an existing one chosen by userId, or a new non-member guardian given by
+        firstName, lastName, e-mail and phone (all four required, checked by the server).
+      properties:
+        userId:
+          type: string
+          format: uuid
+          description: UUID of an existing guardian user
+          x-hal-input-type: UserId
+        firstName:
+          type: string
+          maxLength: 100
+          description: First name of a new guardian
+        lastName:
+          type: string
+          maxLength: 100
+          description: Last name of a new guardian
+        email:
+          type: string
+          maxLength: 255
+          description: E-mail of a new guardian
+        phone:
+          type: string
+          maxLength: 50
+          description: Telephone of a new guardian
+
+    LegalGuardianGroupSummaryResponse:
+      type: object
+      x-klabis-relation:
+        collectionRelation: legalGuardianGroupSummaryResponseList
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        guardians:
+          type: array
+          items:
+            $ref: '#/components/schemas/LegalGuardianGroupSummaryGuardian'
+        minorCount:
+          type: integer
+          format: int32
+
+    LegalGuardianGroupSummaryGuardian:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+        lastName:
+          type: string
+
+    # guardians/minors are arrays of HAL-wrapped items (each carrying its own _links at runtime), so
+    # the Java record fields resolve to List<EntityModel<X>>. See x-hal-entity-items in the
+    # klabis-api-spec skill.
+    LegalGuardianGroupResponse:
+      type: object
+      description: Legal guardian group detail with its minors as independently linked items.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        minors:
+          type: array
+          x-hal-entity-items: true
+          items:
+            $ref: '#/components/schemas/LegalGuardianGroupMinorResponse'
+
+    LegalGuardianGroupGuardianResponse:
+      type: object
+      x-klabis-relation:
+        collectionRelation: legalGuardianGroupGuardianResponseList
+      properties:
+        userId:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+
+    LegalGuardianGroupMinorResponse:
+      type: object
+      properties:
+        memberId:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+        lastName:
+          type: string
+        registrationNumber:
+          type: string
+        joinedAt:
+          type: string
+          format: date-time
+
+    # === LegalGuardians =================================================================================
+
+    LegalGuardianResponse:
+      type: object
+      description: Profile of a non-member legal guardian.
+      required: [userId, loginName, firstName, lastName, email, phone]
+      properties:
+        userId:
+          type: string
+          format: uuid
+          x-klabis-target-id: MEMBER
+        loginName:
+          type: string
+          description: Login number of the guardian (EXTnnnn)
+          example: EXT0001
+        firstName:
+          type: string
+        lastName:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+
+    UpdateLegalGuardianRequest:
+      type: object
+      description: |
+        Partial update of names; e-mail and telephone are required and always sent, and a null or blank
+        value is refused with 400.
+      required: [email, phone]
+      properties:
+        firstName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        lastName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        email:
+          type: string
+          minLength: 1
+          maxLength: 255
+          x-klabis-not-blank: true
+        phone:
+          type: string
+          minLength: 1
+          maxLength: 50
+          x-klabis-not-blank: true
+
+    LegalGuardianKind:
+      type: string
+      enum: [MEMBER, LEGAL_GUARDIAN]
+
+    LegalGuardianOptionResponse:
+      type: object
+      description: |
+        Candidate for a legal guardian. value/prompt make it usable as remote HAL-FORMS options.
+      properties:
+        value:
+          type: string
+          description: User UUID of the candidate
+        prompt:
+          type: string
+          description: Display label of the candidate - name with registration number (members) or e-mail (non-members)
+          example: Jan Novák (ZBM9500)
+        kind:
+          $ref: '#/components/schemas/LegalGuardianKind'
+        registrationNumber:
+          type: string
+          description: Present for members
+        email:
+          type: string
+          description: Present for non-members and for members having an e-mail

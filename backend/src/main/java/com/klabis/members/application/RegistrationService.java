@@ -3,18 +3,26 @@ package com.klabis.members.application;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.UserId;
 import com.klabis.common.users.UserService;
+import com.klabis.common.users.application.PermissionService;
 import com.klabis.members.MemberId;
+import com.klabis.members.domain.GuardianContacts;
+import com.klabis.members.domain.GuardiansNotAllowedException;
 import com.klabis.members.domain.Member;
 import com.klabis.members.domain.MemberRepository;
 import com.klabis.members.domain.RegistrationNumber;
+import com.klabis.members.domain.RegistrationNumberAlreadyInUseException;
 import com.klabis.members.domain.RegistrationNumberGenerator;
+import com.klabis.members.legalguardian.application.LegalGuardianPort;
+import com.klabis.members.legalguardiangroup.application.LegalGuardianGroupPort;
 import org.jmolecules.ddd.annotation.Service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
 import java.time.LocalDate;
+import java.util.Set;
 
 /**
  * Service for member registration operations.
@@ -41,6 +49,10 @@ public class RegistrationService implements RegistrationPort {
     private final MemberRepository memberRepository;
     private final UserService userService;
     private final RegistrationNumberGenerator registrationNumberGenerator;
+    private final LegalGuardianPort legalGuardianPort;
+    private final LegalGuardianGroupPort legalGuardianGroupPort;
+    private final MemberCompletenessPort memberCompletenessPort;
+    private final PermissionService permissionService;
 
     /**
      * Constructs a new RegistrationPort.
@@ -48,14 +60,26 @@ public class RegistrationService implements RegistrationPort {
      * @param memberRepository            the member repository for persisting members
      * @param userService                 the user service for creating users and permissions
      * @param registrationNumberGenerator the generator for registration numbers
+     * @param legalGuardianPort           creates new non-member legal guardians and releases a taken-over one
+     * @param legalGuardianGroupPort      assigns the legal guardians to the registered minor
+     * @param memberCompletenessPort      tells what the legal guardians offer towards the minor's contacts
+     * @param permissionService           grants a taken-over guardian the authorities of a member
      */
     public RegistrationService(
             MemberRepository memberRepository,
             UserService userService,
-            RegistrationNumberGenerator registrationNumberGenerator) {
+            RegistrationNumberGenerator registrationNumberGenerator,
+            LegalGuardianPort legalGuardianPort,
+            LegalGuardianGroupPort legalGuardianGroupPort,
+            MemberCompletenessPort memberCompletenessPort,
+            PermissionService permissionService) {
         this.memberRepository = memberRepository;
         this.userService = userService;
         this.registrationNumberGenerator = registrationNumberGenerator;
+        this.legalGuardianPort = legalGuardianPort;
+        this.legalGuardianGroupPort = legalGuardianGroupPort;
+        this.memberCompletenessPort = memberCompletenessPort;
+        this.permissionService = permissionService;
     }
 
     @Transactional
@@ -65,39 +89,98 @@ public class RegistrationService implements RegistrationPort {
         Assert.notNull(command.personalInformation().getDateOfBirth(), "Date of birth must not be null");
 
         LocalDate dateOfBirth = command.personalInformation().getDateOfBirth();
+        boolean minor = command.personalInformation().isMinor();
+
+        if (minor && command.takenOverLegalGuardian() != null) {
+            throw GuardiansNotAllowedException.takeOverByMinor();
+        }
+        if (!minor && !command.legalGuardians().isEmpty()) {
+            throw GuardiansNotAllowedException.adultWithGuardians();
+        }
+
+        Set<UserId> guardians = command.legalGuardians().isEmpty()
+                                ? Set.of()
+                                : legalGuardianPort.resolveGuardians(command.legalGuardians());
+        GuardianContacts guardianContacts = guardians.isEmpty()
+                                            ? GuardianContacts.NONE
+                                            : memberCompletenessPort.contactsOfChosenGuardians(guardians);
 
         RegistrationNumber registrationNumber = registrationNumberGenerator.generate(dateOfBirth);
         log.debug("Generated registration number: {} for date of birth: {}",
                 registrationNumber.getValue(), dateOfBirth);
 
-        UserId sharedUserId = userService.createUser(
-                registrationNumber.getValue(),
-                command.email().value(),
-                Authority.getStandardUserAuthorities()
-        );
+        Member member = register(command, registrationNumber, guardianContacts, false);
 
-        log.debug("User created with shared ID: {} for username: {}",
-                sharedUserId, registrationNumber.getValue());
+        if (!guardians.isEmpty()) {
+            legalGuardianGroupPort.setGuardiansOf(member.getId(), guardians);
+        }
+        return member;
+    }
 
-        Member.RegisterMember domainCommand = new Member.RegisterMember(
-                MemberId.fromUserId(sharedUserId),
-                registrationNumber,
-                command.personalInformation(),
-                command.address(),
-                command.email(),
-                command.phone(),
-                command.guardian(),
-                command.birthNumber(),
-                command.bankAccountNumber(),
-                command.registeredBy()
-        );
+    @Transactional
+    @Override
+    public Member importMember(ImportMember command) {
+        Assert.notNull(command.registrationNumber(), "Registration number must not be null");
 
-        Member member = Member.register(domainCommand);
+        return register(command.details(), command.registrationNumber(), GuardianContacts.NONE, true);
+    }
 
-        Member savedMember = memberRepository.save(member);
+    /**
+     * Single path both entry points converge onto once the registration number is decided -
+     * generated for a hand registration, adopted from ORIS for an import. Everything below this
+     * point (user creation and the shared-id invariant) is identical for both; only the domain
+     * factory differs — {@code importing} routes to {@link Member#importFromOris}, which tolerates
+     * incomplete data, instead of {@link Member#register}, which does not (design.md D5).
+     */
+    private Member register(RegisterNewMember command, RegistrationNumber registrationNumber,
+                            GuardianContacts guardianContacts, boolean importing) {
+        try {
+            UserId sharedUserId = command.takenOverLegalGuardian() != null
+                                  ? takeOverLegalGuardian(command.takenOverLegalGuardian())
+                                  : userService.createUser(
+                    registrationNumber.getValue(),
+                    Authority.getStandardUserAuthorities()
+            );
 
-        log.debug("Member created with shared ID: {}", savedMember.getId());
+            log.debug("User created with shared ID: {} for username: {}",
+                    sharedUserId, registrationNumber.getValue());
 
-        return savedMember;
+            Member.RegisterMember domainCommand = new Member.RegisterMember(
+                    MemberId.fromUserId(sharedUserId),
+                    registrationNumber,
+                    command.personalInformation(),
+                    command.address(),
+                    command.email(),
+                    command.phone(),
+                    command.birthNumber(),
+                    command.bankAccountNumber(),
+                    command.registeredBy()
+            );
+
+            Member member = importing ? Member.importFromOris(domainCommand)
+                                                   : Member.register(domainCommand, guardianContacts);
+
+            Member savedMember = memberRepository.save(member);
+
+            log.debug("Member created with shared ID: {}", savedMember.getId());
+
+            return savedMember;
+        } catch (DataIntegrityViolationException e) {
+            // The UNIQUE constraint on members.registration_number (and, since the registration
+            // number doubles as the username, on common.users.user_name) is what enforces
+            // "already in use" - no existence check is made beforehand, since that would just be
+            // a race between the check and this save. See design.md D4.
+            throw new RegistrationNumberAlreadyInUseException(registrationNumber, e);
+        }
+    }
+
+    /**
+     * The guardian's user becomes the member's user, so the person keeps their login number and their
+     * legal guardian groups; only the guardian profile is replaced by the member profile.
+     */
+    private UserId takeOverLegalGuardian(UserId guardianId) {
+        legalGuardianPort.releaseForMembership(guardianId);
+        permissionService.updateUserPermissions(guardianId, Authority.getStandardUserAuthorities());
+        return guardianId;
     }
 }

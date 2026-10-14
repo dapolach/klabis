@@ -1,28 +1,25 @@
 package com.klabis.members.infrastructure.restapi;
 
-import com.klabis.common.HateoasTestingSupport;
+import com.klabis.members.MembersWebMvcTest;
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.UserId;
 import com.klabis.members.MemberId;
 import com.klabis.members.MemberTestDataBuilder;
 import com.klabis.members.application.ManagementPort;
+import com.klabis.members.application.MemberViewAccess;
 import com.klabis.members.application.RegistrationPort;
 import com.klabis.members.domain.BirthNumber;
 import com.klabis.members.domain.Member;
-import com.klabis.members.domain.MemberRepository;
+import com.klabis.common.settings.OrisClubKeyManagementPort;
+import com.klabis.sync.application.SynchronizationPort;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.hateoas.MediaTypes;
-import org.springframework.hateoas.server.EntityLinks;
 import org.springframework.http.MediaType;
-import org.springframework.test.context.bean.override.convention.TestBean;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
@@ -40,28 +37,30 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * so they are captured by Spring Modulith outbox within a transaction.
  */
 @DisplayName("Birth Number Audit – Controller Tests")
-@WebMvcTest(controllers = {MemberController.class, RegistrationController.class})
-@WithPostprocessors
+@MembersWebMvcTest
 class BirthNumberAuditControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
 
-    @MockitoBean
+    @Autowired
+    private com.klabis.members.application.MemberCompletenessPort memberCompletenessPort;
+
+    @Autowired
+    private com.klabis.members.legalguardiangroup.application.LegalGuardianGroupPort legalGuardianGroupPort;
+
+    @Autowired
     private ManagementPort managementService;
 
-    @MockitoBean
-    private MemberRepository memberRepository;
-
-    @MockitoBean
+    @Autowired
     private RegistrationPort registrationService;
 
-    @TestBean
-    private EntityLinks entityLinks;
+    @Autowired
+    private OrisClubKeyManagementPort orisClubKeyManagementPort;
 
-    static EntityLinks entityLinks() {
-        return HateoasTestingSupport.createModuleEntityLinks(MemberController.class);
-    }
+    @Autowired
+    private SynchronizationPort synchronizationPort;
+
 
     @Nested
     @DisplayName("GET /api/members/{id} – VIEW audit")
@@ -75,16 +74,15 @@ class BirthNumberAuditControllerTest {
             Member member = MemberTestDataBuilder.aMemberWithId(memberId)
                     .withNationality("CZ")
                     .withBirthNumber(BirthNumber.of("900101/1234"))
-                    .withNoGuardian()
                     .build();
 
-            when(managementService.getMemberAndRecordView(any(MemberId.class), any(UserId.class), anyBoolean()))
+            when(managementService.getMemberAndRecordView(any(MemberId.class), any(UserId.class), any(MemberViewAccess.class)))
                     .thenReturn(member);
 
             mockMvc.perform(get("/api/members/{id}", memberId).accept(MediaTypes.HAL_FORMS_JSON_VALUE))
                     .andExpect(status().isOk());
 
-            verify(managementService).getMemberAndRecordView(eq(new MemberId(memberId)), any(UserId.class), anyBoolean());
+            verify(managementService).getMemberAndRecordView(eq(new MemberId(memberId)), any(UserId.class), any(MemberViewAccess.class));
         }
     }
 
@@ -99,7 +97,6 @@ class BirthNumberAuditControllerTest {
             UUID memberId = UUID.randomUUID();
             Member existingMember = MemberTestDataBuilder.aMemberWithId(memberId)
                     .withNationality("CZ")
-                    .withNoGuardian()
                     .build();
 
             when(managementService.prefilledUpdateCommand(any(MemberId.class)))
@@ -128,7 +125,6 @@ class BirthNumberAuditControllerTest {
             UUID memberId = UUID.randomUUID();
             Member existingMember = MemberTestDataBuilder.aMemberWithId(memberId)
                     .withNationality("CZ")
-                    .withNoGuardian()
                     .build();
 
             when(managementService.prefilledUpdateCommand(any(MemberId.class)))
@@ -163,7 +159,6 @@ class BirthNumberAuditControllerTest {
             Member registeredMember = MemberTestDataBuilder.aMemberWithId(newMemberId)
                     .withNationality("CZ")
                     .withBirthNumber(BirthNumber.of("900101/1234"))
-                    .withNoGuardian()
                     .build();
 
             when(registrationService.registerMember(any())).thenReturn(registeredMember);
@@ -201,7 +196,6 @@ class BirthNumberAuditControllerTest {
             UUID newMemberId = UUID.randomUUID();
             Member registeredMember = MemberTestDataBuilder.aMemberWithId(newMemberId)
                     .withNationality("CZ")
-                    .withNoGuardian()
                     .build();
 
             when(registrationService.registerMember(any())).thenReturn(registeredMember);

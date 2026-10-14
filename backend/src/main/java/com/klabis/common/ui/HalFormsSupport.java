@@ -1,18 +1,15 @@
 package com.klabis.common.ui;
 
-import com.klabis.common.security.MethodSecurityAnnotations;
-import com.klabis.common.security.fieldsecurity.OwnerId;
-import com.klabis.common.security.fieldsecurity.OwnerVisible;
-import com.klabis.common.security.fieldsecurity.OwnershipResolver;
-import com.klabis.common.security.fieldsecurity.SecuritySpelEvaluator;
-import com.klabis.common.users.HasAuthority;
+import com.klabis.common.authorization.AuthorizationEvaluator;
+import com.klabis.common.authorization.FieldAccess;
+import com.klabis.common.authorization.TargetRef;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.servlet.http.HttpServletRequest;
+import org.jspecify.annotations.Nullable;
 import org.openapitools.jackson.nullable.JsonNullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.io.support.SpringFactoriesLoader;
 import org.springframework.hateoas.*;
 import org.springframework.hateoas.mediatype.AffordanceModelFactory;
@@ -24,8 +21,6 @@ import org.springframework.hateoas.server.core.MethodInvocation;
 import org.springframework.hateoas.server.mvc.WebMvcLinkBuilder;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -38,7 +33,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.lang.reflect.RecordComponent;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import static com.klabis.common.ui.CollectionPropertyContext.markCollectionProperty;
@@ -48,16 +42,16 @@ import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.linkTo;
 @Component
 public class HalFormsSupport {
 
+    // static because the affordance helpers are called from controllers and postprocessors that have no
+    // access to the Spring context
     private static HalFormsSupport INSTANCE;
 
-    private final ObjectProvider<OwnershipResolver> ownershipResolverProvider;
+    private final AuthorizationEvaluator authorizationEvaluator;
 
-    public HalFormsSupport(ObjectProvider<OwnershipResolver> ownershipResolverProvider) {
-        this.ownershipResolverProvider = ownershipResolverProvider;
+    public HalFormsSupport(AuthorizationEvaluator authorizationEvaluator) {
+        this.authorizationEvaluator = authorizationEvaluator;
     }
 
-    // TODO: this static causes troubles in tests (some tests are not starting full context and this post construct may not be called yet, so tests are working without ownership resolver)
-    // (try to find out way how to do this resolved directly from data)
     @PostConstruct
     void init() {
         INSTANCE = this;
@@ -70,10 +64,24 @@ public class HalFormsSupport {
         }
     }
 
+    /**
+     * Test hook: several cached test contexts share one JVM, so the instance registered last by
+     * {@link #init()} does not have to belong to the context the current test runs against.
+     */
+    static void useInstance(HalFormsSupport instance) {
+        INSTANCE = instance;
+    }
+
+    private static HalFormsSupport instance() {
+        HalFormsSupport instance = INSTANCE;
+        Assert.state(instance != null, "HalFormsSupport is not initialised: no HalFormsSupport bean in the application context");
+        return instance;
+    }
+
     public static Optional<WebMvcLinkBuilder> klabisLinkTo(Object invocation) {
         LastInvocationAware lastInvocationAware = getLastInvocationAware(invocation);
 
-        if (INSTANCE != null && !INSTANCE.isMethodAuthorized(lastInvocationAware)) {
+        if (!instance().isMethodAuthorized(lastInvocationAware)) {
             return Optional.empty();
         }
 
@@ -83,14 +91,14 @@ public class HalFormsSupport {
     public static List<Affordance> klabisAfford(Object invocation) {
         LastInvocationAware lastInvocationAware = getLastInvocationAware(invocation);
 
-        if (INSTANCE != null && !INSTANCE.isMethodAuthorized(lastInvocationAware)) {
+        if (!instance().isMethodAuthorized(lastInvocationAware)) {
             return Collections.emptyList();
         }
 
         Affordance result = afford(lastInvocationAware);
 
         // update affordance model: if request body is record, change `readOnly` attribute based on @HalForms annotation (if not present, leave original value)
-        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, Map.of(), Map.of());
+        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, Map.of());
 
         return List.of(modifiedResult);
     }
@@ -99,33 +107,24 @@ public class HalFormsSupport {
         return new EntityModelWithDomain<>(dto, domain);
     }
 
-    private static final String PROPERTY_OPTIONS_REQUEST_ATTR = HalFormsSupport.class.getName() + ".propertyOptions";
-    private static final String PROMPTED_OPTIONS_REQUEST_ATTR = HalFormsSupport.class.getName() + ".promptedOptions";
+    private static final String OPTIONS_DEF_REQUEST_ATTR = HalFormsSupport.class.getName() + ".optionsDef";
 
     /**
-     * Returns the value-only inline options for the named property from the current request context, or null if none are set.
+     * Returns the options definition (value list, inline value+prompt pairs, or remote link) for the
+     * named property from the current request context, or null if none are set.
      */
-    static List<String> getInlineOptionsForProperty(String propertyName) {
+    static HalFormsOptionsDef getOptionsDefForProperty(String propertyName) {
         HttpServletRequest request = currentRequest();
         if (request == null) {
             return null;
         }
-        @SuppressWarnings("unchecked")
-        Map<String, List<String>> ctx = (Map<String, List<String>>) request.getAttribute(PROPERTY_OPTIONS_REQUEST_ATTR);
+        Map<String, HalFormsOptionsDef> ctx = getOptionsDefContext(request);
         return ctx != null ? ctx.get(propertyName) : null;
     }
 
-    /**
-     * Returns the value+prompt inline options for the named property from the current request context, or null if none are set.
-     */
-    static List<HalFormsInlineOption> getPromptedInlineOptionsForProperty(String propertyName) {
-        HttpServletRequest request = currentRequest();
-        if (request == null) {
-            return null;
-        }
-        @SuppressWarnings("unchecked")
-        Map<String, List<HalFormsInlineOption>> ctx = (Map<String, List<HalFormsInlineOption>>) request.getAttribute(PROMPTED_OPTIONS_REQUEST_ATTR);
-        return ctx != null ? ctx.get(propertyName) : null;
+    @SuppressWarnings("unchecked")
+    private static Map<String, HalFormsOptionsDef> getOptionsDefContext(HttpServletRequest request) {
+        return (Map<String, HalFormsOptionsDef>) request.getAttribute(OPTIONS_DEF_REQUEST_ATTR);
     }
 
     private static HttpServletRequest currentRequest() {
@@ -134,116 +133,45 @@ public class HalFormsSupport {
     }
 
     /**
-     * Like {@link #klabisAfford}, but injects inline HAL-FORMS options for the given properties.
-     * The map keys are property names; values are the inline option lists (value strings only).
+     * Like {@link #klabisAfford}, but injects HAL-FORMS options for the given properties — a plain
+     * value list, inline value+prompt pairs, or a link the client follows to fetch options separately
+     * (see {@link HalFormsOptionsDef}). A single affordance can mix all three kinds across its fields.
      * Options are stored as request attributes and are automatically scoped to the current HTTP request.
      */
-    public static List<Affordance> klabisAffordWithOptions(Object invocation, Map<String, List<String>> propertyOptions) {
+    public static List<Affordance> klabisAffordWithOptions(Object invocation, Map<String, HalFormsOptionsDef> optionsDef) {
         LastInvocationAware lastInvocationAware = getLastInvocationAware(invocation);
 
-        if (INSTANCE != null && !INSTANCE.isMethodAuthorized(lastInvocationAware)) {
+        if (!instance().isMethodAuthorized(lastInvocationAware)) {
             return Collections.emptyList();
         }
 
         Affordance result = afford(lastInvocationAware);
-        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, propertyOptions, Map.of());
+        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, optionsDef);
         return List.of(modifiedResult);
-    }
-
-    /**
-     * Like {@link #klabisAffordWithPromptedOptions}, but also accepts plain string options for some properties.
-     * Use when a single affordance needs both value+prompt pairs (prompted) and plain-value options (propertyOptions) for different fields.
-     */
-    public static List<Affordance> klabisAffordWithMixedOptions(Object invocation,
-                                                                  Map<String, List<String>> propertyOptions,
-                                                                  Map<String, List<HalFormsInlineOption>> promptedOptions) {
-        LastInvocationAware lastInvocationAware = getLastInvocationAware(invocation);
-
-        if (INSTANCE != null && !INSTANCE.isMethodAuthorized(lastInvocationAware)) {
-            return Collections.emptyList();
-        }
-
-        Affordance result = afford(lastInvocationAware);
-        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, propertyOptions, promptedOptions);
-        return List.of(modifiedResult);
-    }
-
-    /**
-     * Like {@link #klabisAfford}, but injects inline HAL-FORMS options with value+prompt pairs for the given properties.
-     * The map keys are property names; values are the inline option lists carrying both a machine value and a human-readable prompt.
-     * Options are stored as request attributes and are automatically scoped to the current HTTP request.
-     */
-    public static List<Affordance> klabisAffordWithPromptedOptions(Object invocation, Map<String, List<HalFormsInlineOption>> promptedOptions) {
-        LastInvocationAware lastInvocationAware = getLastInvocationAware(invocation);
-
-        if (INSTANCE != null && !INSTANCE.isMethodAuthorized(lastInvocationAware)) {
-            return Collections.emptyList();
-        }
-
-        Affordance result = afford(lastInvocationAware);
-        Affordance modifiedResult = modifyAffordanceForHalForms(result, lastInvocationAware, Map.of(), promptedOptions);
-        return List.of(modifiedResult);
-    }
-
-    private record MethodAuthMeta(HasAuthority hasAuthority, OwnerVisible ownerVisible, int ownerIdParamIndex) {
-        boolean hasSecurityAnnotations() {
-            return hasAuthority != null || ownerVisible != null;
-        }
-    }
-
-    /**
-     * Keyed by {@code Method} alone even though the cached value also depends on {@code targetClass}.
-     * That is only sound while every caller derives {@code targetClass} from the method itself
-     * (today: {@code method.getDeclaringClass()}). A second call site passing an unrelated class —
-     * a CGLIB proxy type, say — would silently receive the entry computed for the first caller.
-     */
-    private static final ConcurrentHashMap<Method, MethodAuthMeta> METHOD_AUTH_CACHE = new ConcurrentHashMap<>();
-
-    private static MethodAuthMeta resolveMethodAuthMeta(Method method, Class<?> targetClass) {
-        return METHOD_AUTH_CACHE.computeIfAbsent(method, m -> {
-            HasAuthority ha = MethodSecurityAnnotations.findMethodAnnotation(m, targetClass, HasAuthority.class);
-            OwnerVisible ov = MethodSecurityAnnotations.findMethodAnnotation(m, targetClass, OwnerVisible.class);
-            int ownerIdx = ov != null
-                    ? MethodSecurityAnnotations.findAnnotatedParameterIndex(m, targetClass, OwnerId.class)
-                    : -1;
-            return new MethodAuthMeta(ha, ov, ownerIdx);
-        });
     }
 
     private boolean isMethodAuthorized(LastInvocationAware invocation) {
         MethodInvocation methodInvocation = invocation.getLastInvocation();
         Method method = methodInvocation.getMethod();
-        Class<?> targetClass = method.getDeclaringClass();
-        MethodAuthMeta meta = resolveMethodAuthMeta(method, targetClass);
+        return authorizationEvaluator.canInvoke(method, method.getDeclaringClass(), methodInvocation.getArguments());
+    }
 
-        if (!meta.hasSecurityAnnotations()) {
-            return true;
+    /**
+     * Decides, through the same evaluator that enforces request bodies, what the user may do with a template
+     * property: change it, only see it, or neither.
+     */
+    private record FieldAuthorization(AuthorizationEvaluator evaluator, @Nullable TargetRef target) {
+
+        static FieldAuthorization of(MethodInvocation invocation) {
+            AuthorizationEvaluator evaluator = instance().authorizationEvaluator;
+            Method method = invocation.getMethod();
+            return new FieldAuthorization(evaluator,
+                    evaluator.targetOf(method, method.getDeclaringClass(), invocation.getArguments()));
         }
 
-        org.springframework.security.core.Authentication authentication =
-                SecurityContextHolder.getContext().getAuthentication();
-        if (authentication == null || !authentication.isAuthenticated()) {
-            return false;
+        FieldAccess accessTo(@Nullable Class<?> payloadType, String property) {
+            return evaluator.requestFieldAccess(payloadType, property, target);
         }
-
-        if (meta.hasAuthority() != null && SecuritySpelEvaluator.hasAuthority(authentication,
-                meta.hasAuthority().value())) {
-            return true;
-        }
-
-        if (meta.ownerVisible() != null && meta.ownerIdParamIndex() >= 0) {
-            Object[] arguments = methodInvocation.getArguments();
-            Object ownerIdValue = (arguments != null && meta.ownerIdParamIndex() < arguments.length)
-                    ? arguments[meta.ownerIdParamIndex()] : null;
-            if (ownerIdValue != null) {
-                OwnershipResolver resolver = ownershipResolverProvider.getIfAvailable();
-                if (resolver != null) {
-                    return resolver.isOwner(ownerIdValue, authentication);
-                }
-            }
-        }
-
-        return false;
     }
 
     private static LastInvocationAware getLastInvocationAware(Object invocation) {
@@ -262,8 +190,7 @@ public class HalFormsSupport {
      * Modifies affordance to apply @HalForms annotations from record components
      */
     private static Affordance modifyAffordanceForHalForms(Affordance affordance, LastInvocationAware invocation,
-                                                           Map<String, List<String>> propertyOptions,
-                                                           Map<String, List<HalFormsInlineOption>> promptedOptions) {
+                                                           Map<String, HalFormsOptionsDef> optionsDef) {
         // Get method metadata
         MethodInvocation methodInvocation = invocation.getLastInvocation();
         Method method = methodInvocation.getMethod();
@@ -276,7 +203,7 @@ public class HalFormsSupport {
 
                 // Check if it's a record
                 if (requestBodyType.isRecord()) {
-                    return createModifiedAffordance(affordance, propertyOptions, promptedOptions);
+                    return createModifiedAffordance(affordance, optionsDef, FieldAuthorization.of(methodInvocation));
                 }
             }
         }
@@ -288,8 +215,8 @@ public class HalFormsSupport {
      * Creates new affordance using AffordanceModelFactory with modified InputPayloadMetadata
      */
     private static Affordance createModifiedAffordance(Affordance original,
-                                                        Map<String, List<String>> propertyOptions,
-                                                        Map<String, List<HalFormsInlineOption>> promptedOptions) {
+                                                        Map<String, HalFormsOptionsDef> optionsDef,
+                                                        FieldAuthorization fieldAuthorization) {
         Optional<AffordanceModelFactory> halFormsFactoryOpt = getHalFormsModelFactory();
 
         if (halFormsFactoryOpt.isEmpty()) {
@@ -309,7 +236,7 @@ public class HalFormsSupport {
 
             // For HAL-FORMS models, use our modified version
             if (model.getClass().getSimpleName().contains("HalForms")) {
-                ConfiguredAffordance configured = new HalFormsConfiguredAffordance(model, propertyOptions, promptedOptions);
+                ConfiguredAffordance configured = new HalFormsConfiguredAffordance(model, optionsDef, fieldAuthorization);
                 AffordanceModel newModel = halFormsFactory.getAffordanceModel(configured);
                 newModels.put(mediaType, newModel);
             } else {
@@ -346,11 +273,11 @@ public class HalFormsSupport {
         private final AffordanceModel delegate;
         private final HalFormsInputPayloadMetadata modifiedInput;
 
-        public HalFormsConfiguredAffordance(AffordanceModel delegate,
-                                             Map<String, List<String>> propertyOptions,
-                                             Map<String, List<HalFormsInlineOption>> promptedOptions) {
+        private HalFormsConfiguredAffordance(AffordanceModel delegate,
+                                             Map<String, HalFormsOptionsDef> optionsDef,
+                                             FieldAuthorization fieldAuthorization) {
             this.delegate = delegate;
-            this.modifiedInput = new HalFormsInputPayloadMetadata(delegate.getInput(), propertyOptions, promptedOptions);
+            this.modifiedInput = new HalFormsInputPayloadMetadata(delegate.getInput(), optionsDef, fieldAuthorization);
         }
 
         @Override
@@ -393,27 +320,27 @@ public class HalFormsSupport {
         private static final Logger LOG = LoggerFactory.getLogger(KlabisHalFormsPropertyMetadataWrapper.class);
 
         private final AffordanceModel.InputPayloadMetadata inputPayloadMetadata;
-        private final Map<String, List<String>> propertyOptions;
-        private final Map<String, List<HalFormsInlineOption>> promptedOptions;
+        private final Map<String, HalFormsOptionsDef> optionsDef;
+        private final FieldAuthorization fieldAuthorization;
 
         HalFormsInputPayloadMetadata(AffordanceModel.InputPayloadMetadata inputPayloadMetadata,
-                                     Map<String, List<String>> propertyOptions,
-                                     Map<String, List<HalFormsInlineOption>> promptedOptions) {
+                                     Map<String, HalFormsOptionsDef> optionsDef,
+                                     FieldAuthorization fieldAuthorization) {
             this.inputPayloadMetadata = inputPayloadMetadata;
-            this.propertyOptions = Map.copyOf(propertyOptions);
-            this.promptedOptions = Map.copyOf(promptedOptions);
+            this.optionsDef = Map.copyOf(optionsDef);
+            this.fieldAuthorization = fieldAuthorization;
         }
 
         @Override
         public Stream<AffordanceModel.PropertyMetadata> stream() {
             HttpServletRequest request = currentRequest();
-            if (request != null) {
-                if (!propertyOptions.isEmpty()) {
-                    request.setAttribute(PROPERTY_OPTIONS_REQUEST_ATTR, propertyOptions);
-                }
-                if (!promptedOptions.isEmpty()) {
-                    request.setAttribute(PROMPTED_OPTIONS_REQUEST_ATTR, promptedOptions);
-                }
+            if (request != null && !optionsDef.isEmpty()) {
+                // Jackson materializes every affordance's property list before it writes any of them to JSON,
+                // so multiple klabisAffordWithOptions calls on the same response all run their stream()
+                // before the first property's "options" is actually serialized. Overwriting the attribute here
+                // would make only the last-processed affordance's options visible; merging keeps all of them.
+                request.setAttribute(OPTIONS_DEF_REQUEST_ATTR, mergeOptions(
+                        getOptionsDefContext(request), optionsDef));
             }
             // Modify property metadata stream based on @HalForms annotations
             return inputPayloadMetadata.stream()
@@ -430,7 +357,7 @@ public class HalFormsSupport {
                             metadata,
                             annotatedElement,
                             isPayloadClassRecord,
-                            isPropertyAuthorized(inputPayloadMetadata.getType(), metadata.getName())))
+                            fieldAuthorization.accessTo(inputPayloadMetadata.getType(), metadata.getName())))
                     .orElse(metadata);
 
             if (wrapped instanceof KlabisHalFormsPropertyMetadataWrapper wrapper && wrapper.isCollectionType()) {
@@ -440,65 +367,20 @@ public class HalFormsSupport {
             return wrapped;
         }
 
+        private static <V> Map<String, V> mergeOptions(Map<String, V> existing, Map<String, V> additional) {
+            if (existing == null || existing.isEmpty()) {
+                return additional;
+            }
+            Map<String, V> merged = new HashMap<>(existing);
+            merged.putAll(additional);
+            return merged;
+        }
+
         private boolean isPropertyDisplayed(AffordanceModel.PropertyMetadata propertyMetadata) {
             if (propertyMetadata instanceof KlabisHalFormsPropertyMetadataWrapper wrapper) {
                 return wrapper.isDisplayed();
             }
             return true;
-        }
-
-        /**
-         * Checks whether the current user is authorized to see the given property in the template.
-         * <p>
-         * For record types, looks for @PreAuthorize or @HasAuthority directly on the record component accessor.
-         * For non-record types, looks on interface methods matching the property name —
-         * the same annotations that control JSON field visibility for the response DTO.
-         */
-        private static boolean isPropertyAuthorized(Class<?> payloadType, String propertyName) {
-            if (payloadType == null) {
-                return true;
-            }
-            if (payloadType.isRecord()) {
-                return Arrays.stream(payloadType.getRecordComponents())
-                        .filter(c -> c.getName().equals(propertyName))
-                        .filter(c -> c.getAccessor().isAnnotationPresent(PreAuthorize.class)
-                                     || c.getAccessor().isAnnotationPresent(HasAuthority.class))
-                        .findFirst()
-                        .map(c -> evaluateSecurityAnnotations(c.getAccessor()))
-                        .orElse(true);
-            }
-            return Arrays.stream(payloadType.getInterfaces())
-                    .flatMap(iface -> Arrays.stream(iface.getMethods()))
-                    .filter(m -> m.getName().equals(propertyName) && m.getParameterCount() == 0)
-                    .filter(m -> m.isAnnotationPresent(PreAuthorize.class) || m.isAnnotationPresent(HasAuthority.class))
-                    .findFirst()
-                    .map(HalFormsInputPayloadMetadata::evaluateSecurityAnnotations)
-                    .orElse(true);
-        }
-
-        private static Boolean evaluateSecurityAnnotations(Method m) {
-            boolean result = true;
-            if (m.isAnnotationPresent(PreAuthorize.class)) {
-                result &= evaluatePreAuthorize(m);
-            }
-            if (m.isAnnotationPresent(HasAuthority.class)) {
-                result &= evaluateHasAuthority(m);
-            }
-            return result;
-        }
-
-        private static boolean evaluateHasAuthority(Method method) {
-            HasAuthority annotation = method.getAnnotation(HasAuthority.class);
-            return SecuritySpelEvaluator.hasAuthority(
-                    SecurityContextHolder.getContext().getAuthentication(),
-                    annotation.value());
-        }
-
-        private static boolean evaluatePreAuthorize(Method method) {
-            PreAuthorize annotation = method.getAnnotation(PreAuthorize.class);
-            org.springframework.security.core.Authentication authentication =
-                    SecurityContextHolder.getContext().getAuthentication();
-            return SecuritySpelEvaluator.evaluate(annotation.value(), method, authentication);
         }
 
         private static Optional<AnnotatedElement> getAnnotatedElementForProperty(AffordanceModel.PayloadMetadata payloadMetadata, AffordanceModel.PropertyMetadata delegate) {
@@ -531,7 +413,7 @@ public class HalFormsSupport {
 
         @Override
         public AffordanceModel.InputPayloadMetadata withMediaTypes(List<MediaType> mediaTypes) {
-            return new HalFormsInputPayloadMetadata(inputPayloadMetadata.withMediaTypes(mediaTypes), propertyOptions, promptedOptions);
+            return new HalFormsInputPayloadMetadata(inputPayloadMetadata.withMediaTypes(mediaTypes), optionsDef, fieldAuthorization);
         }
 
         @Override
@@ -558,14 +440,14 @@ public class HalFormsSupport {
         private final AffordanceModel.PropertyMetadata delegate;
         private final HalForms propertyAnnotation;
         private final boolean defaultIsReadOnly;
-        private final boolean authorized;
+        private final FieldAccess access;
 
-        public KlabisHalFormsPropertyMetadataWrapper(AffordanceModel.PropertyMetadata delegate, AnnotatedElement propertyElement, boolean isRecord, boolean authorized) {
+        public KlabisHalFormsPropertyMetadataWrapper(AffordanceModel.PropertyMetadata delegate, AnnotatedElement propertyElement, boolean isRecord, FieldAccess access) {
             this.delegate = delegate;
             this.defaultIsReadOnly = isRecord ? false : delegate.isReadOnly();
             this.propertyAnnotation = propertyElement.isAnnotationPresent(HalForms.class) ? propertyElement.getAnnotation(
                     HalForms.class) : null;
-            this.authorized = authorized;
+            this.access = access;
         }
 
         @Override
@@ -580,6 +462,9 @@ public class HalFormsSupport {
 
         @Override
         public boolean isReadOnly() {
+            if (access != FieldAccess.WRITE) {
+                return true;
+            }
             if (propertyAnnotation != null) {
                 // Component has @HalForms annotation, use its access value
                 HalForms.Access access = propertyAnnotation.access();
@@ -625,7 +510,7 @@ public class HalFormsSupport {
         }
 
         public boolean isDisplayed() {
-            if (!authorized) {
+            if (access == FieldAccess.NONE) {
                 return false;
             }
             return propertyAnnotation == null || !HalForms.Access.NONE.equals(propertyAnnotation.access());

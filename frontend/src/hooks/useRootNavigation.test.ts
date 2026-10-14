@@ -44,8 +44,18 @@ afterEach(() => {
 });
 
 describe('useRootNavigation — section assignment', () => {
-    it('assigns main section to events and admin section to training-groups, category-presets, family-groups', async () => {
-        mockFetchWithResponse(buildHalResponse(['events', 'training-groups', 'category-presets', 'family-groups']));
+    it('assigns the profile link to the personal section so it stays out of the menu', async () => {
+        mockFetchWithResponse(buildHalResponse(['events', 'profile']));
+
+        const {result} = renderHook(() => useRootNavigation(), {wrapper: createWrapper()});
+
+        await waitFor(() => expect(result.current.data).toBeDefined());
+
+        expect(result.current.data!.find(i => i.rel === 'profile')?.section).toBe('personal');
+    });
+
+    it('assigns main section to events and admin section to training-groups, category-presets, legalGuardianGroups', async () => {
+        mockFetchWithResponse(buildHalResponse(['events', 'training-groups', 'category-presets', 'legalGuardianGroups']));
 
         const {result} = renderHook(() => useRootNavigation(), {wrapper: createWrapper()});
 
@@ -57,7 +67,7 @@ describe('useRootNavigation — section assignment', () => {
         expect(findItem('events')?.section).toBe('main');
         expect(findItem('training-groups')?.section).toBe('admin');
         expect(findItem('category-presets')?.section).toBe('admin');
-        expect(findItem('family-groups')?.section).toBe('admin');
+        expect(findItem('legalGuardianGroups')?.section).toBe('admin');
     });
 
     it('returns only main-section items when response has no admin rels', async () => {
@@ -73,7 +83,7 @@ describe('useRootNavigation — section assignment', () => {
     });
 
     it('returns only admin-section items when response has only admin rels', async () => {
-        mockFetchWithResponse(buildHalResponse(['training-groups', 'category-presets', 'family-groups']));
+        mockFetchWithResponse(buildHalResponse(['training-groups', 'category-presets', 'legalGuardianGroups']));
 
         const {result} = renderHook(() => useRootNavigation(), {wrapper: createWrapper()});
 
@@ -95,9 +105,9 @@ describe('useRootNavigation — section assignment', () => {
         expect(items.find(i => i.rel === 'account')?.section).toBe('main');
     });
 
-    it('does NOT include family-groups navigation item when HAL link is absent', async () => {
-        // Backend omits the family-groups link for users without MEMBERS:MANAGE permission.
-        // Frontend hook should simply not include the item — no family-groups nav item appears.
+    it('does NOT include legalGuardianGroups navigation item when HAL link is absent', async () => {
+        // Backend omits the legalGuardianGroups link for users without MEMBERS:MANAGE permission.
+        // Frontend hook should simply not include the item — no legalGuardianGroups nav item appears.
         mockFetchWithResponse(buildHalResponse(['events', 'members', 'groups']));
 
         const {result} = renderHook(() => useRootNavigation(), {wrapper: createWrapper()});
@@ -105,7 +115,7 @@ describe('useRootNavigation — section assignment', () => {
         await waitFor(() => expect(result.current.data).toBeDefined());
 
         const items = result.current.data!;
-        expect(items.find(i => i.rel === 'family-groups')).toBeUndefined();
+        expect(items.find(i => i.rel === 'legalGuardianGroups')).toBeUndefined();
     });
 
     it('assigns admin section to membership-fees rel', async () => {

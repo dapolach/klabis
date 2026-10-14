@@ -100,17 +100,42 @@ Field-level authorization, on schema properties:
 
 | extension | generates |
 |---|---|
-| `x-klabis-owner-id: true` | `@OwnerId` |
-| `x-klabis-owner-visible: true` | `@OwnerVisible` |
-| `x-klabis-authority: MEMBERS_MANAGE` | `@HasAuthority(Authority.MEMBERS_MANAGE)` |
+| `x-klabis-target-id: MEMBER` | `@TargetId(TargetType.MEMBER)` — the property identifies the target the record is about |
+| `x-klabis-owner-visible: true` | `@OwnerVisible` — the target being the caller is enough |
+| `x-klabis-authority: MEMBERS_MANAGE` or `[MEMBERS_MANAGE, MEMBERS_EDIT_PROFILE]` | `@HasAuthority({Authority.MEMBERS_MANAGE, ...})` — any one of the listed authorities suffices |
+| `x-klabis-read-authority: [MEMBERS_READ]` | `@ReadAuthority({Authority.MEMBERS_READ})` — **request schemas only**: HAL-FORMS shows the field read-only to a user who holds one of these but may not change it |
 | `x-klabis-halforms-access: READ_ONLY` | `@HalForms(access = READ_ONLY)` |
 
-Endpoint authorization uses the same three keys one level up: `x-klabis-authority` and
-`x-klabis-owner-visible: true` on the **operation**, `x-klabis-owner-id: true` on one of its **path
-parameters**. The owner-id parameter may be a shared `$ref` — `@OwnerId` is inert unless the method
-is also `@OwnerVisible` — but an operation declaring `x-klabis-owner-visible` must have exactly one,
-which `validate.mjs` enforces during bundling: `@OwnerVisible` without `@OwnerId` denies instead of
-resolving ownership.
+The generator renders the complete annotation text from these keys (`x-klabis-authority` /
+`x-klabis-read-authority` accept a single name or a list) and the templates print it verbatim.
+
+Endpoint authorization uses the same keys one level up: `x-klabis-authority` and
+`x-klabis-owner-visible: true` on the **operation**, `x-klabis-target-id: <TYPE>` on one of its **path
+parameters** (`TYPE` is `MEMBER` or `EVENT`). The target-id parameter may be a shared `$ref` —
+`@TargetId` is inert unless the method is guarded by an authority held over specific targets or is
+`@OwnerVisible`. `validate.mjs` enforces during bundling that:
+
+- every authority in the list is a constant of `Authority.java`;
+- an operation listing an authority that may be held over specific targets (`GrantForm.SPECIFIC`)
+  has exactly one `x-klabis-target-id` parameter, and its type equals that authority's `targetType`.
+  `ALL`-only authorities are target-agnostic and need none;
+- an operation declaring `x-klabis-owner-visible` has exactly one `x-klabis-target-id` parameter —
+  `@OwnerVisible` without `@TargetId` denies instead of resolving ownership. Both rules are one check
+  per operation: a wrong parameter count is reported once, whatever combination of authority and
+  owner-visible demands the target;
+- `x-klabis-target-id` sits on a path parameter or a schema property, never on an operation;
+- `x-klabis-read-authority` sits only on properties of schemas reachable from a request body.
+
+`x-klabis-owner-id: true` no longer exists; the validator rejects it.
+
+Codegen directives, on schema properties (consumed by `KlabisSpringCodegen` and stripped from the
+bundle by `derive.mjs`, so frontend types never see them):
+
+| extension | generates |
+|---|---|
+| `x-hal-input-type: RankingRequest` | `@HalForms(formInputType = "RankingRequest")`, assembled into a single `@HalForms` with `x-klabis-halforms-access` (`@HalForms` is not `@Repeatable`) |
+| `x-klabis-nullable: true` | `JsonNullable<T>` without any `oneOf` composition (the bundle keeps the legacy `oneOf: [{$ref}, {type: 'null'}]` shape) |
+| `x-klabis-nullable: false` | plain `T` despite a nullable wire type — request bodies want `true`; `false` narrows the frontend type while the wire stays nullable, so it belongs on response fields only |
 
 Hypermedia, on **response objects** (not on schemas — links belong to the representation):
 
@@ -168,8 +193,12 @@ Two exceptions to "never write an envelope", both in `common.yaml`: `EntityModel
 is nothing but `_links`, so there is no payload to derive from, and a `schemaMappings` entry keeps
 each from being emitted as a Java class.
 
-Extension values are validated during bundling: `x-klabis-authority` must be a constant of
-`Authority.java`, and `operation:` inside `x-hal-*` must match an existing `operationId`.
+Extension values are validated during bundling: authorities must be constants of
+`Authority.java` (see above), and `operation:` inside `x-hal-*` must match an existing `operationId`. The
+codegen directives are validated too — `x-hal-input-type` must be a non-empty string, and
+`x-klabis-nullable` must be a plain boolean, must not sit next to `oneOf`/`allOf` on the same
+property, and must not declare a nullability the type already states. A `@HalForms(...)`
+inside `x-field-extra-annotation` is rejected outright (use `x-hal-input-type`).
 
 `x-klabis-*` keys are consumed by the overridden templates in `backend/src/main/openapi-templates/`
 — `pojo.mustache` for schema properties, `api.mustache` for operations, `pathParams.mustache` for
@@ -204,7 +233,8 @@ Klabis branch across. Each file opens with a note saying so.
 - **Nullable properties use the OpenAPI 3.1 union spelling**, `type: [string, 'null']`, never the
   3.0 `nullable: true`. These documents declare `openapi: 3.1.0`; `nullable: true` is a 3.0 keyword
   that a 3.1-aware tool (Redocly, `openApiNullable`) does not recognize as nullable at all. For a
-  `$ref` that needs to be nullable, `allOf: [{$ref: ...}, nullable: true]` doesn't compose the way
-  it looks like it should — use `oneOf: [{$ref: ...}, {type: 'null'}]` instead (see
-  `MemberFeeSummaryResponse.currentGroup` in `membershipfees.yaml`), and re-read the `oneOf`/`allOf`
-  warning above first if the property carries a field-authorization extension.
+  `$ref` property use `$ref` + `x-klabis-nullable: true` — no composition, sibling vendor extensions
+  survive, and the bundle emits the same `oneOf: [{$ref}, {type: 'null'}]` shape frontend types were
+  built on. The legacy `oneOf: [{$ref: ...}, {type: 'null'}]` spelling still generates the same
+  wrapper but strips sibling vendor extensions; every property was migrated off it, so don't write
+  new ones.

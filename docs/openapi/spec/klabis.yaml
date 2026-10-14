@@ -33,16 +33,30 @@ paths:
     $ref: './members.yaml#/paths/~1api~1members'
   /api/members/options:
     $ref: './members.yaml#/paths/~1api~1members~1options'
+  /api/members/oris-import:
+    $ref: './members.yaml#/paths/~1api~1members~1oris-import'
   /api/members/{id}:
     $ref: './members.yaml#/paths/~1api~1members~1{id}'
   /api/members/{id}/suspend:
     $ref: './members.yaml#/paths/~1api~1members~1{id}~1suspend'
   /api/members/{id}/resume:
     $ref: './members.yaml#/paths/~1api~1members~1{id}~1resume'
+  /api/members/{id}/account-activation:
+    $ref: './members.yaml#/paths/~1api~1members~1{id}~1account-activation'
+  /api/members/{id}/legal-guardians:
+    $ref: './members.yaml#/paths/~1api~1members~1{id}~1legal-guardians'
   /api/event-types:
     $ref: './events.yaml#/paths/~1api~1event-types'
   /api/event-types/{id}:
     $ref: './events.yaml#/paths/~1api~1event-types~1{id}'
+  /api/disciplines/options:
+    $ref: './events.yaml#/paths/~1api~1disciplines~1options'
+  /api/disciplines:
+    $ref: './events.yaml#/paths/~1api~1disciplines'
+  /api/disciplines/{id}:
+    $ref: './events.yaml#/paths/~1api~1disciplines~1{id}'
+  /api/disciplines/{id}/restore:
+    $ref: './events.yaml#/paths/~1api~1disciplines~1{id}~1restore'
   /api/events:
     $ref: './events.yaml#/paths/~1api~1events'
   /api/events/{id}:
@@ -55,8 +69,6 @@ paths:
     $ref: './events.yaml#/paths/~1api~1events~1{eventId}~1accommodation-list'
   /api/events/import:
     $ref: './events.yaml#/paths/~1api~1events~1import'
-  /api/events/{id}/sync-from-oris:
-    $ref: './events.yaml#/paths/~1api~1events~1{id}~1sync-from-oris'
   /api/events/sync-from-oris/all-upcoming:
     $ref: './events.yaml#/paths/~1api~1events~1sync-from-oris~1all-upcoming'
   /api/events/import-batch:
@@ -123,18 +135,18 @@ paths:
     $ref: './membershipfees.yaml#/paths/~1api~1members~1{memberId}~1fee-summary~1{year}'
   /api/members/{memberId}/fee-history:
     $ref: './membershipfees.yaml#/paths/~1api~1members~1{memberId}~1fee-history'
-  /api/family-groups:
-    $ref: './groups.yaml#/paths/~1api~1family-groups'
-  /api/family-groups/{id}:
-    $ref: './groups.yaml#/paths/~1api~1family-groups~1{id}'
-  /api/family-groups/{id}/parents:
-    $ref: './groups.yaml#/paths/~1api~1family-groups~1{id}~1parents'
-  /api/family-groups/{id}/parents/{memberId}:
-    $ref: './groups.yaml#/paths/~1api~1family-groups~1{id}~1parents~1{memberId}'
-  /api/family-groups/{id}/children:
-    $ref: './groups.yaml#/paths/~1api~1family-groups~1{id}~1children'
-  /api/family-groups/{id}/children/{memberId}:
-    $ref: './groups.yaml#/paths/~1api~1family-groups~1{id}~1children~1{memberId}'
+  /api/legal-guardians/{userId}:
+    $ref: './members.yaml#/paths/~1api~1legal-guardians~1{userId}'
+  /api/legal-guardian-options:
+    $ref: './members.yaml#/paths/~1api~1legal-guardian-options'
+  /api/legal-guardian-groups:
+    $ref: './members.yaml#/paths/~1api~1legal-guardian-groups'
+  /api/legal-guardian-groups/{id}:
+    $ref: './members.yaml#/paths/~1api~1legal-guardian-groups~1{id}'
+  /api/legal-guardian-groups/{id}/guardians:
+    $ref: './members.yaml#/paths/~1api~1legal-guardian-groups~1{id}~1guardians'
+  /api/legal-guardian-groups/{id}/legal-guardians:
+    $ref: './members.yaml#/paths/~1api~1legal-guardian-groups~1{id}~1legal-guardians'
   /api/groups:
     $ref: './groups.yaml#/paths/~1api~1groups'
   /api/groups/{id}:
@@ -183,6 +195,14 @@ paths:
     $ref: './common.yaml#/paths/~1api~1users~1{id}~1permissions'
   /api/oris/events:
     $ref: './oris.yaml#/paths/~1api~1oris~1events'
+  /api/{entityType}/{id}/sync:
+    $ref: './sync.yaml#/paths/~1api~1{entityType}~1{id}~1sync'
+  /api/{entityType}/{id}/sync/acknowledgement:
+    $ref: './sync.yaml#/paths/~1api~1{entityType}~1{id}~1sync~1acknowledgement'
+  /api/{entityType}/{id}/sync/resolution:
+    $ref: './sync.yaml#/paths/~1api~1{entityType}~1{id}~1sync~1resolution'
+  /api/{entityType}/{id}/sync/reset:
+    $ref: './sync.yaml#/paths/~1api~1{entityType}~1{id}~1sync~1reset'
 
 components:
   # Inlined rather than $ref'd to _shared/security.yaml: a root component that only $refs another
@@ -202,5 +222,6 @@ components:
             profile: display user profile information
             MEMBERS: Members
             EVENTS: Events
+            SYNC: Synchronisation
 
   schemas: {}

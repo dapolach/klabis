@@ -11,6 +11,8 @@ import com.klabis.events.domain.EventRanking;
 import com.klabis.events.domain.EventStatus;
 import com.klabis.events.domain.Money;
 import com.klabis.events.domain.RegistrationDeadlines;
+import com.klabis.events.domain.SiPolicy;
+import com.klabis.events.domain.SiUsage;
 import org.springframework.data.annotation.*;
 import org.springframework.data.domain.Persistable;
 import org.springframework.data.relational.core.mapping.Column;
@@ -83,9 +85,6 @@ class EventMemento implements Persistable<UUID> {
     @Column("registration_deadline_3")
     private LocalDate registrationDeadline3;
 
-    @Column("oris_id")
-    private Integer orisId;
-
     // Race categories are part of the aggregate; category id is the primary key, so renaming
     // a category (or leaving its id unchanged across an update) preserves its identity.
     @MappedCollection(idColumn = "event_id")
@@ -111,6 +110,18 @@ class EventMemento implements Persistable<UUID> {
 
     @Column("base_entry_fee_currency")
     private String baseEntryFeeCurrency;
+
+    @Column("shared_transport_enabled")
+    private boolean sharedTransportEnabled;
+
+    @Column("shared_accommodation_enabled")
+    private boolean sharedAccommodationEnabled;
+
+    @Column("si_usage")
+    private String siUsage;
+
+    @Column("si_rental_allowed")
+    private boolean siRentalAllowed;
 
     // Registrations are part of the aggregate
     // Using Set instead of List to avoid needing a position/key column
@@ -194,7 +205,6 @@ class EventMemento implements Persistable<UUID> {
         memento.registrationDeadline2 = rd.deadline2().orElse(null);
         memento.registrationDeadline3 = rd.deadline3().orElse(null);
         memento.status = event.getStatus().name();
-        memento.orisId = event.getOrisId();
         memento.categories = event.getCategories().stream()
                 .map(EventCategoryMemento::from)
                 .collect(java.util.stream.Collectors.toSet());
@@ -213,6 +223,11 @@ class EventMemento implements Persistable<UUID> {
             memento.baseEntryFeeAmount = baseEntryFee.amount();
             memento.baseEntryFeeCurrency = baseEntryFee.currency().getCurrencyCode();
         }
+
+        memento.sharedTransportEnabled = event.isSharedTransportEnabled();
+        memento.sharedAccommodationEnabled = event.isSharedAccommodationEnabled();
+        memento.siUsage = event.getSiPolicy().usage().name();
+        memento.siRentalAllowed = event.getSiPolicy().rentalAllowed();
     }
 
     /**
@@ -280,10 +295,12 @@ class EventMemento implements Persistable<UUID> {
                 deadlines,
                 eventStatus,
                 this.cancellationReason,
-                this.orisId,
                 categoriesList,
                 ranking,
                 baseEntryFee,
+                this.sharedTransportEnabled,
+                this.sharedAccommodationEnabled,
+                SiPolicy.of(SiUsage.valueOf(this.siUsage), this.siRentalAllowed),
                 registrations.stream().map(EventRegistrationMemento::toEventRegistration).toList(),
                 new AuditMetadata(
                         this.createdAt,

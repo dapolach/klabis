@@ -1,6 +1,5 @@
 package com.klabis.events.infrastructure.restapi;
 
-import tools.jackson.databind.ObjectMapper;
 import com.klabis.E2ETest;
 import com.klabis.common.WithKlabisMockUser;
 import com.klabis.common.security.JwtParams;
@@ -8,7 +7,7 @@ import com.klabis.common.users.Authority;
 import com.klabis.common.users.UserId;
 import com.klabis.events.domain.Event;
 import com.klabis.events.domain.EventRegisterCommandBuilder;
-import com.klabis.groups.application.LastOwnershipCheckerImpl;
+import com.klabis.members.legalguardiangroup.domain.LegalGuardianGroupRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,6 +19,7 @@ import org.springframework.test.context.jdbc.Sql;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -51,15 +51,11 @@ class EventRegistrationE2ETest {
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private LastOwnershipCheckerImpl lastOwnershipCheckerImpl;
-
-    @MockitoBean
-    @SuppressWarnings("unused")
     private com.klabis.groups.traininggroup.domain.TrainingGroupRepository trainingGroupRepository;
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private com.klabis.groups.familygroup.domain.FamilyGroupRepository familyGroupRepository;
+    private LegalGuardianGroupRepository legalGuardianGroupRepository;
 
     @Autowired
     private MockMvc mockMvc;
@@ -329,6 +325,20 @@ class EventRegistrationE2ETest {
         return createPublishedEvent(name, date, List.of());
     }
 
+    private String createPublishedEvent(String name, LocalDate date, List<String> categories,
+                                        Map<String, Object> extraProperties) throws Exception {
+        String eventId = createDraftEvent(name, date, categories, extraProperties);
+
+        mockMvc.perform(
+                        post("/api/events/{id}/publish", eventId)
+                                .with(eventsManageUserAuthentication())
+                )
+                .andExpect(status().isNoContent())
+                .andReturn();
+
+        return eventId;
+    }
+
     @Test
     @DisplayName("5.1 Editing SI card number preserves registeredAt")
     void shouldUpdateSiCardNumberAndPreserveRegisteredAt() throws Exception {
@@ -496,18 +506,74 @@ class EventRegistrationE2ETest {
                 .andExpect(jsonPath("$.siCardNumber").value("123456"));
     }
 
+    @Test
+    @DisplayName("5.6 Editing registration with shared offers disabled retains earlier choices")
+    void shouldRetainSharedChoicesWhenOffersDisabled() throws Exception {
+        String eventId = createPublishedEvent("Shared choice retention test", LocalDate.now().plusDays(10),
+                List.of(), Map.of("sharedTransportEnabled", true, "sharedAccommodationEnabled", true));
+
+        mockMvc.perform(
+                post("/api/events/{id}/registrations", eventId)
+                        .contentType("application/json")
+                        .content(objectMapper.writeValueAsString(Map.of("siCardNumber", "123456",
+                                "wantsSharedTransport", true, "wantsSharedAccommodation", true)))
+                        .with(klabisAuthentication(member(TEST_MEMBER_ID)))
+        ).andExpect(status().isCreated());
+
+        mockMvc.perform(
+                        patch("/api/events/{id}", eventId)
+                                .contentType("application/json")
+                                .content("{\"sharedTransportEnabled\":false,\"sharedAccommodationEnabled\":false}")
+                                .with(eventsManageUserAuthentication())
+                )
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(
+                        put("/api/events/{eventId}/registrations/{memberId}", eventId, TEST_MEMBER_ID)
+                                .contentType("application/json")
+                                .content(objectMapper.writeValueAsString(Map.of("siCardNumber", "999999")))
+                                .with(klabisAuthentication(member(TEST_MEMBER_ID)))
+                )
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(
+                        patch("/api/events/{id}", eventId)
+                                .contentType("application/json")
+                                .content("{\"sharedTransportEnabled\":true,\"sharedAccommodationEnabled\":true}")
+                                .with(eventsManageUserAuthentication())
+                )
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(
+                        get("/api/events/{id}/registrations/{memberId}", eventId, TEST_MEMBER_ID)
+                                .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                                .with(klabisAuthentication(member(TEST_MEMBER_ID)))
+                )
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.siCardNumber").value("999999"))
+                .andExpect(jsonPath("$.wantsSharedTransport").value(true))
+                .andExpect(jsonPath("$.wantsSharedAccommodation").value(true));
+    }
+
     private String createDraftEvent(String name) throws Exception {
         return createDraftEvent(name, LocalDate.now().plusMonths(1));
     }
 
     private String createDraftEvent(String name, LocalDate eventDate, List<String> categories) throws Exception {
+        return createDraftEvent(name, eventDate, categories, Map.of());
+    }
+
+    private String createDraftEvent(String name, LocalDate eventDate, List<String> categories,
+                                    Map<String, Object> extraProperties) throws Exception {
         Map<String, Object> event = new java.util.HashMap<>();
         event.put("name", name);
         event.put("eventDate", eventDate.toString());
         event.put("location", "Test Location");
         event.put("organizer", "TEST");
+        event.put("siUsage", "REQUIRED");
         event.put("websiteUrl", null);
         event.put("coordinators", null);
+        event.putAll(extraProperties);
         if (!categories.isEmpty()) {
             event.put("categories", categories.stream()
                     .map(name2 -> Map.of("name", name2))

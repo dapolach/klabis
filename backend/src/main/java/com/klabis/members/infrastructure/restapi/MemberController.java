@@ -1,21 +1,36 @@
 package com.klabis.members.infrastructure.restapi;
 
+import com.klabis.common.authorization.AuthorizationEvaluator;
+import com.klabis.common.authorization.TargetRef;
 import com.klabis.common.mvc.MvcComponent;
 import com.klabis.common.ui.HalResponseContext;
 import com.klabis.common.ui.ModelWithDomainPostprocessor;
 import com.klabis.common.ui.RootModel;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.UserId;
-import com.klabis.members.ActingUser;
+import com.klabis.common.users.ActingUser;
 import com.klabis.members.CurrentUserData;
 import com.klabis.members.MemberId;
+import com.klabis.members.application.MemberAccountActivationPort;
+import com.klabis.members.application.MemberCompletenessPort;
 import com.klabis.members.application.ManagementPort;
+import com.klabis.members.application.MemberDiscoveryPort;
+import com.klabis.members.application.MemberViewAccess;
 import com.klabis.members.domain.Member;
 import com.klabis.members.domain.MemberFilter;
-import com.klabis.members.domain.MemberRepository;
+import com.klabis.members.legalguardiangroup.application.LegalGuardianGroupPort;
+import com.klabis.members.legalguardiangroup.domain.LegalGuardianGroup;
+import com.klabis.members.legalguardiangroup.infrastructure.restapi.MemberLegalGuardianGroup;
+import com.klabis.sync.application.SynchronizationPort;
+import com.klabis.sync.domain.SyncEntityType;
+import com.klabis.sync.domain.SyncTarget;
+import com.klabis.sync.infrastructure.restapi.SyncApi;
+import com.klabis.sync.infrastructure.restapi.SyncEntityTypeParam;
 import jakarta.validation.Valid;
 import org.jmolecules.architecture.hexagonal.PrimaryAdapter;
 import org.springdoc.core.annotations.ParameterObject;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -27,15 +42,17 @@ import org.springframework.hateoas.server.RepresentationModelProcessor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static com.klabis.common.ui.HalFormsSupport.klabisAfford;
+import static com.klabis.common.ui.HalFormsSupport.klabisAffordWithOptions;
 import static com.klabis.common.ui.HalFormsSupport.klabisLinkTo;
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.linkTo;
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.methodOn;
@@ -47,16 +64,48 @@ import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.methodOn;
 public class MemberController implements MembersApi {
 
     private final ManagementPort managementService;
-    private final MemberRepository memberRepository;
     private final ConversionService conversionService;
+    private final Optional<MemberDiscoveryPort> memberDiscoveryPort;
+    private final SynchronizationPort synchronizationPort;
+    private final MemberCompletenessPort memberCompletenessPort;
+    private final LegalGuardianGroupPort legalGuardianGroupPort;
+    private final AuthorizationEvaluator authorizationEvaluator;
 
     public MemberController(
             ManagementPort managementService,
-            MemberRepository memberRepository,
-            ConversionService conversionService) {
+            ConversionService conversionService,
+            Optional<MemberDiscoveryPort> memberDiscoveryPort,
+            SynchronizationPort synchronizationPort,
+            MemberCompletenessPort memberCompletenessPort,
+            LegalGuardianGroupPort legalGuardianGroupPort,
+            AuthorizationEvaluator authorizationEvaluator) {
+        this.authorizationEvaluator = authorizationEvaluator;
+        this.memberCompletenessPort = memberCompletenessPort;
+        this.legalGuardianGroupPort = legalGuardianGroupPort;
         this.managementService = managementService;
-        this.memberRepository = memberRepository;
         this.conversionService = conversionService;
+        this.memberDiscoveryPort = memberDiscoveryPort;
+        this.synchronizationPort = synchronizationPort;
+    }
+
+    /**
+     * Runs the exact same discovery pass {@link MemberDiscoveryJob}'s own cron runs
+     * (design.md D11) — this only lets a human start it once, deliberately, before the
+     * schedule is relied upon. Running it twice brings nobody in twice: already-paired
+     * members are skipped identically either way.
+     * <p>
+     * The only implementation of {@link MemberDiscoveryPort}, {@code MemberDiscoveryJob},
+     * only exists under the {@code oris} profile ({@code @OrisIntegrationComponent});
+     * without it there is nothing to trigger.
+     */
+    @Override
+    public ResponseEntity<Void> importFromOris() {
+        return memberDiscoveryPort
+                .map(port -> {
+                    port.discoverNewMembers();
+                    return ResponseEntity.noContent().<Void>build();
+                })
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     @Override
@@ -87,7 +136,7 @@ public class MemberController implements MembersApi {
         var command = new Member.ResumeMembership(currentUserId);
         managementService.resumeMember(new MemberId(id), command);
         return ResponseEntity.noContent()
-                .location(linkTo(methodOn(MembersApi.class).listMembers(null, null, Pageable.unpaged(), null)).toUri())
+                .location(linkTo(methodOn(MembersApi.class).listMembers(null, null, null, Pageable.unpaged(), null)).toUri())
                 .build();
     }
 
@@ -105,14 +154,13 @@ public class MemberController implements MembersApi {
 
         managementService.suspendMember(new MemberId(id), command);
         return ResponseEntity.noContent()
-                .location(linkTo(methodOn(MembersApi.class).listMembers(null, null, Pageable.unpaged(), null)).toUri())
+                .location(linkTo(methodOn(MembersApi.class).listMembers(null, null, null, Pageable.unpaged(), null)).toUri())
                 .build();
     }
 
-    @Transactional(readOnly = true)
     @Override
     public ResponseEntity<List<MemberOptionResponse>> listMemberOptions() {
-        List<MemberOptionResponse> options = memberRepository.findAll(MemberFilter.activeOnly()).stream()
+        List<MemberOptionResponse> options = managementService.listActiveMembers().stream()
                 .map(member -> MemberOptionResponseBuilder.builder()
                         .prompt("%s %s (%s)".formatted(member.getFirstName(), member.getLastName(), member.getRegistrationNumber().getValue()))
                         .value(member.getId().uuid().toString())
@@ -121,31 +169,41 @@ public class MemberController implements MembersApi {
         return ResponseEntity.ok(options);
     }
 
-    @Transactional(readOnly = true)
     @Override
     public ResponseEntity<Page<MemberSummaryResponse>> listMembers(
             @Valid @RequestParam(required = false) String q,
             @Valid @RequestParam(required = false) String status,
+            @Valid @RequestParam(required = false) Boolean incomplete,
             @PageableDefault(size = 10, sort = {"lastName", "firstName"}, direction = Sort.Direction.ASC) @ParameterObject Pageable pageable,
             @ActingUser CurrentUserData currentUser) {
 
         validateSortFields(pageable.getSort());
 
-        MemberFilter filter = buildFilter(q, status, currentUser);
+        MemberFilter filter = buildFilter(q, status, incomplete);
 
-        Page<Member> memberPage = memberRepository.findAll(filter, pageable);
+        Page<Member> memberPage = managementService.listMembers(filter, pageable);
+
+        // One batch lookup per page, read by MemberSummaryPostprocessor.
+        List<String> pageMemberIds = memberPage.getContent().stream().map(m -> m.getId().uuid().toString()).toList();
+        HalResponseContext.setDeferredContext(EnrolledMemberIds.class, () -> new EnrolledMemberIds(
+                pageMemberIds.isEmpty()
+                        ? Set.of()
+                        : synchronizationPort.findActiveByTargets(SyncEntityType.MEMBER, pageMemberIds).stream()
+                                .map(reference -> reference.target().entityId())
+                                .collect(Collectors.toSet())));
 
         HalResponseContext.setDomainList(memberPage.getContent());
 
         return ResponseEntity.ok(memberPage.map(member -> conversionService.convert(member, MemberSummaryResponse.class)));
     }
 
-    private MemberFilter buildFilter(String q, String status, CurrentUserData currentUser) {
+    private MemberFilter buildFilter(String q, String status, Boolean incomplete) {
         MemberFilter.StatusFilter resolvedStatus = parseStatus(status);
+        boolean canManage = authorizationEvaluator.has(Authority.MEMBERS_MANAGE);
 
-        MemberFilter filter = new MemberFilter(resolvedStatus, q);
+        MemberFilter filter = new MemberFilter(resolvedStatus, q, canManage && Boolean.TRUE.equals(incomplete));
 
-        if (!currentUser.hasAuthority(Authority.MEMBERS_MANAGE)) {
+        if (!canManage) {
             filter = filter.withStatus(MemberFilter.StatusFilter.ACTIVE);
         }
 
@@ -189,24 +247,79 @@ public class MemberController implements MembersApi {
             @ActingUser CurrentUserData currentUser) {
 
         MemberId memberId = new MemberId(id);
-        Member member = managementService.getMemberAndRecordView(memberId, currentUser.userId(),
-                currentUser.hasAuthority(Authority.MEMBERS_MANAGE));
+        Member member = managementService.getMemberAndRecordView(memberId, currentUser.userId(), viewAccessTo(memberId));
+
+        Optional<LegalGuardianGroup> guardianGroup = legalGuardianGroupPort.findGroupOf(memberId);
+        HalResponseContext.setContext(new MemberLegalGuardianGroup(guardianGroup.orElse(null)));
 
         HalResponseContext.setDomain(member);
-        return ResponseEntity.ok(conversionService.convert(member, MemberDetailsResponse.class));
+        MemberDetailsResponse response = conversionService.convert(member, MemberDetailsResponse.class);
+        return ResponseEntity.ok(MemberDetailsResponseBuilder.builder(response)
+                .missingData(liveMissingData(member, guardianGroup))
+                .build());
+    }
+
+    // The birth number rule is asked of the response field itself so the audit can never disagree with what is serialized.
+    private MemberViewAccess viewAccessTo(MemberId memberId) {
+        TargetRef member = TargetRef.member(memberId.uuid());
+        return new MemberViewAccess(
+                authorizationEvaluator.isAllowed(List.of(Authority.MEMBERS_MANAGE, Authority.MEMBERS_EDIT_PROFILE), member, false),
+                authorizationEvaluator.canReadField(MemberDetailsResponse.class, "birthNumber", member));
+    }
+
+    // The detail is computed live (the guardians' contacts may have changed since the member was last saved),
+    // unlike the materialized flag the member list reads.
+    private List<MissingDataItem> liveMissingData(Member member, Optional<LegalGuardianGroup> guardianGroup) {
+        Set<UserId> guardians = guardianGroup.map(LegalGuardianGroup::getGuardians).orElse(Set.of());
+        return memberCompletenessPort.missingData(member, guardians).stream()
+                .map(item -> MissingDataItem.valueOf(item.name()))
+                .toList();
     }
 
 }
 
+/**
+ * Carries which members of the listed page are paired for synchronisation, from
+ * {@code MemberController#listMembers} to {@code MemberSummaryPostprocessor} (one batch lookup per page).
+ */
+record EnrolledMemberIds(Set<String> memberIds) {
+
+    boolean contains(UUID memberId) {
+        return memberIds.contains(memberId.toString());
+    }
+}
+
+// Runs before MemberLegalGuardianGroupLinkProcessor, which extends the self link created here.
 @MvcComponent
+@Order(Ordered.HIGHEST_PRECEDENCE)
 class MemberDetailsPostprocessor extends ModelWithDomainPostprocessor<MemberDetailsResponse, Member> {
+
+    private final MemberAccountActivationPort accountActivationPort;
+    private final SynchronizationPort synchronizationPort;
+
+    MemberDetailsPostprocessor(MemberAccountActivationPort accountActivationPort,
+                               SynchronizationPort synchronizationPort) {
+        this.accountActivationPort = accountActivationPort;
+        this.synchronizationPort = synchronizationPort;
+    }
 
     @Override
     public void process(EntityModel<MemberDetailsResponse> dtoModel, Member member) {
         MemberSelfLinkSupport.addSelfLinkWithAffordances(dtoModel, member);
 
-        klabisLinkTo(methodOn(MembersApi.class).listMembers(null, null, Pageable.unpaged(), null))
+        if (accountActivationPort.isAvailableFor(member)) {
+            UUID id = member.getId().uuid();
+            dtoModel.mapLink(IanaLinkRelations.SELF, self -> (Link) self.andAffordances(
+                    klabisAfford(methodOn(MemberAccountActivationApi.class).sendMemberAccountActivation(id))));
+        }
+
+        klabisLinkTo(methodOn(MembersApi.class).listMembers(null, null, null, Pageable.unpaged(), null))
                 .ifPresent(link -> dtoModel.add(link.withRel("collection")));
+
+        UUID memberId = member.getId().uuid();
+        boolean enrolled = synchronizationPort.findByTarget(
+                new SyncTarget(SyncEntityType.MEMBER, memberId.toString())).isPresent();
+        MemberSelfLinkSupport.addSyncLinkIfEnrolled(dtoModel, memberId, enrolled);
     }
 }
 
@@ -216,6 +329,15 @@ class MemberSummaryPostprocessor extends ModelWithDomainPostprocessor<MemberSumm
     @Override
     public void process(EntityModel<MemberSummaryResponse> dtoModel, Member member) {
         MemberSelfLinkSupport.addSelfLinkWithAffordances(dtoModel, member);
+
+        UUID memberId = member.getId().uuid();
+        MemberSelfLinkSupport.addSyncLinkIfEnrolled(dtoModel, memberId, isEnrolledInList(memberId));
+    }
+
+    private static boolean isEnrolledInList(UUID memberId) {
+        return HalResponseContext.findContext(EnrolledMemberIds.class)
+                .map(enrolled -> enrolled.contains(memberId))
+                .orElse(false);
     }
 }
 
@@ -236,12 +358,20 @@ final class MemberSelfLinkSupport {
             var self = link.withSelfRel()
                     .andAffordances(klabisAfford(methodOn(MembersApi.class).updateMember(memberId, null, null)));
             if (member.isActive()) {
-                self = self.andAffordances(klabisAfford(methodOn(MembersApi.class).suspendMember(memberId, null, null)));
+                self = self.andAffordances(klabisAfford(
+                        methodOn(MembersApi.class).suspendMember(memberId, null, null)));
             } else {
                 self = self.andAffordances(klabisAfford(methodOn(MembersApi.class).resumeMember(memberId, null)));
             }
             return (Link) self;
         }).ifPresent(dtoModel::add);
+    }
+
+    static void addSyncLinkIfEnrolled(RepresentationModel<?> dtoModel, UUID memberId, boolean enrolled) {
+        if (enrolled) {
+            klabisLinkTo(methodOn(SyncApi.class).getSyncState(SyncEntityTypeParam.MEMBERS, memberId.toString()))
+                    .ifPresent(link -> dtoModel.add(link.withRel("sync")));
+        }
     }
 }
 
@@ -252,7 +382,9 @@ class MemberListPostprocessor implements RepresentationModelProcessor<PagedModel
     public PagedModel<EntityModel<MemberSummaryResponse>> process(PagedModel<EntityModel<MemberSummaryResponse>> pagedModel) {
         pagedModel.mapLink(IanaLinkRelations.SELF, selfLink -> (Link) selfLink
                 .andAffordances(klabisAfford(methodOn(MembersApi.class).updateMember(null, null, null)))
-                .andAffordances(klabisAfford(methodOn(RegistrationApi.class).registerMember(null, null))));
+                .andAffordances(klabisAffordWithOptions(
+                        methodOn(RegistrationApi.class).registerMember(null, null),
+                        LegalGuardianOptions.forRegistration())));
         return pagedModel;
     }
 }
@@ -262,7 +394,7 @@ class MembersRootPostprocessor implements RepresentationModelProcessor<EntityMod
 
     @Override
     public EntityModel<RootModel> process(EntityModel<RootModel> model) {
-        klabisLinkTo(methodOn(MembersApi.class).listMembers(null, null, Pageable.unpaged(), null))
+        klabisLinkTo(methodOn(MembersApi.class).listMembers(null, null, null, Pageable.unpaged(), null))
                 .ifPresent(link -> model.add(link.withRel("members")));
         return model;
     }

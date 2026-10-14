@@ -11,6 +11,15 @@ const renderDialog = (props?: Partial<PermissionsDialogProps>) => {
         memberName: 'Jan Novák',
         memberRegistrationNumber: 'ZBM102',
         permissions: ['MEMBERS:MANAGE'],
+        assignableAuthorities: [
+            'MEMBERS:MANAGE',
+            'MEMBERS:PERMISSIONS',
+            'EVENTS:MANAGE',
+            'CALENDAR:MANAGE',
+            'GROUPS:TRAINING',
+            'EVENTS:REGISTRATIONS',
+            'FINANCE:MANAGE',
+        ],
         isLoading: false,
         isSaving: false,
         error: null,
@@ -50,6 +59,12 @@ describe('PermissionsDialog', () => {
 
             const switches = screen.getAllByRole('switch');
             expect(switches.length).toBeGreaterThan(0);
+        });
+
+        it('does not offer MEMBERS:EDIT_PROFILE because the backend options never include relationship-granted authorities', () => {
+            renderDialog();
+
+            expect(screen.queryByRole('switch', {name: /Úprava údajů člena/i})).not.toBeInTheDocument();
         });
 
         it('pre-selects permissions currently assigned to the user', () => {
@@ -139,6 +154,30 @@ describe('PermissionsDialog', () => {
 
             const toggle = screen.getByRole('switch', {name: /Správa financí/i});
             expect(toggle).toHaveAttribute('aria-checked', 'false');
+        });
+
+        it('renders authorities in the order provided by the backend, including unknown ones', () => {
+            renderDialog({assignableAuthorities: ['MEMBERS:MANAGE', 'SYNC:MANAGE', 'SOME:UNKNOWN']});
+
+            const switches = screen.getAllByRole('switch');
+            expect(switches.map(s => s.getAttribute('aria-label'))).toEqual([
+                'Správa členů',
+                'Správa synchronizace',
+                'SOME:UNKNOWN',
+            ]);
+        });
+
+        it('reflects current state for SYNC:MANAGE when assigned', () => {
+            renderDialog({assignableAuthorities: ['SYNC:MANAGE'], permissions: ['SYNC:MANAGE']});
+
+            const toggle = screen.getByRole('switch', {name: /Správa synchronizace/i});
+            expect(toggle).toHaveAttribute('aria-checked', 'true');
+        });
+
+        it('does not render a toggle for an authority missing from the backend catalogue', () => {
+            renderDialog({assignableAuthorities: ['MEMBERS:MANAGE']});
+
+            expect(screen.queryByRole('switch', {name: /Správa oprávnění/i})).not.toBeInTheDocument();
         });
 
         it('toggles permission on click', async () => {

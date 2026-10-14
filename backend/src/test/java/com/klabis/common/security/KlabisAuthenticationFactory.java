@@ -1,5 +1,6 @@
 package com.klabis.common.security;
 
+import com.klabis.common.authorization.AuthorizationSnapshot;
 import org.springframework.security.oauth2.jose.jws.JwsAlgorithms;
 import org.springframework.security.oauth2.jwt.Jwt;
 
@@ -19,14 +20,18 @@ public class KlabisAuthenticationFactory {
                 .build();
     }
 
+    /**
+     * Token whose snapshot holds the authorities of {@code jwtParams} over everything. Tests authenticate users
+     * that have no stored permissions; the fixed snapshot stands in for what the database would say.
+     */
     public static KlabisJwtAuthenticationToken createAuthenticationToken(JwtParams jwtParams) {
-        Jwt jwt = KlabisAuthenticationFactory.createKlabisToken(jwtParams);
-        return new KlabisJwtAuthenticationToken(jwt,
-                jwtParams.userId(),
-                jwtParams.memberId(),
-                jwtParams.grantedAuthorities());
+        return createAuthenticationToken(jwtParams, AuthorizationSnapshot.ofGrantedAuthorities(jwtParams.grantedAuthorities()));
     }
 
-
-
+    public static KlabisJwtAuthenticationToken createAuthenticationToken(JwtParams jwtParams, AuthorizationSnapshot snapshot) {
+        return new KlabisJwtAuthenticationToken(createKlabisToken(jwtParams),
+                jwtParams.userId(),
+                jwtParams.memberId(),
+                () -> snapshot);
+    }
 }

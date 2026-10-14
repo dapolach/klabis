@@ -3,9 +3,7 @@
 ## Purpose
 
 Captures technical API requirements shared across all bounded contexts: response format standards, serialization conventions, hypermedia link structure, pagination metadata, concurrent update handling, value object technical details, backward compatibility, and server infrastructure (HTTPS, TLS, SSL).
-
 ## Requirements
-
 ### Requirement: ISO-8601 Date and DateTime Serialization
 
 All API endpoints SHALL serialize date and datetime fields using ISO-8601 format.
@@ -506,7 +504,7 @@ The system SHALL publish domain events for cross-module integration.
 
 ### Requirement: Member Detail Response — Conditional Edit Template
 
-The system SHALL include a PATCH template in the member detail response only for users authorized to edit the member, and the template SHALL contain only the fields the caller is permitted to modify.
+The system SHALL include a PATCH template in the member detail response only for users authorized to edit the member — users with MEMBERS:MANAGE authority or users holding "Úprava údajů člena" over the member — and the template SHALL contain the fields the caller is permitted to modify. Administrator-reserved fields SHALL be included as read-only for a caller who may see but not modify them.
 
 #### Scenario: Admin retrieves member detail
 
@@ -515,12 +513,24 @@ The system SHALL include a PATCH template in the member detail response only for
 
 #### Scenario: Member retrieves own profile
 
-- **WHEN** authenticated member requests their own member detail
-- **THEN** response includes a PATCH template with only self-editable fields (email, phone, address, dietaryRestrictions)
+- **WHEN** an authenticated adult member requests their own member detail
+- **THEN** response includes a PATCH template with the member-editable fields
+- **AND** the administrator-reserved fields (firstName, lastName, dateOfBirth, gender, birthNumber) are present as read-only
+
+#### Scenario: Holder of profile editing retrieves another member's detail
+
+- **WHEN** a user holding "Úprava údajů člena" over a member, without MEMBERS:MANAGE, requests that member's detail
+- **THEN** response includes a PATCH template with the member-editable fields
+- **AND** the administrator-reserved fields are present as read-only
+
+#### Scenario: Minor retrieves own profile
+
+- **WHEN** a minor requests their own member detail
+- **THEN** response does not include a PATCH template
 
 #### Scenario: Member retrieves another member's profile
 
-- **WHEN** authenticated member requests a different member's detail without admin permission
+- **WHEN** authenticated member requests a different member's detail without admin permission and without "Úprava údajů člena" over that member
 - **THEN** response does not include a PATCH template
 
 ### Requirement: Tables Persist User Sort Preference
@@ -571,3 +581,163 @@ The user SHALL have an action to reset the table to its default sort, which clea
 - **WHEN** the member opens the events list in browser B (or another device, signed in as the same user)
 - **THEN** browser B opens the events list with the default sort
 - **AND** browser A retains its sort preference unchanged
+
+### Requirement: Synchronisation Data Protection At Rest
+
+The stored copies of the data exchanged with an external system SHALL be encrypted at rest, using the same encryption applied to other sensitive stored data. The values used to detect change SHALL be digests of a complete exchanged record, never of an individual field, so that a stored digest cannot be used to recover a single value from a small range of possibilities.
+
+The synchronisation history SHALL NOT store copies of the exchanged data, so that the data exists in one place only.
+
+#### Scenario: Stored copies of exchanged data are unreadable in the database
+
+- **WHEN** the copies of the data exchanged with an external system are stored
+- **THEN** they are encrypted at rest and cannot be read directly from the database
+
+#### Scenario: Change detection uses whole-record digests
+
+- **WHEN** the system records what the two sides looked like
+- **THEN** the digest it keeps covers the complete exchanged record
+- **AND** no digest of an individual field is stored
+
+#### Scenario: Stored copies can be rebuilt
+
+- **GIVEN** stored copies of exchanged data that can no longer be read
+- **WHEN** the affected records are synchronised again
+- **THEN** the copies are rebuilt from both sides
+- **AND** no data is lost, because these copies are derived rather than authoritative
+
+### Requirement: Synchronisation History Retention
+
+Entries in the synchronisation history SHALL be removed automatically once they are older than a configurable retention period, with a default of 30 days. Removing history SHALL never remove a synchronisation record itself, so that the last successful synchronisation of a long-lived record stays available after its individual attempts have been removed.
+
+#### Scenario: Old history entries are removed
+
+- **WHEN** entries in the synchronisation history are older than the configured retention period
+- **THEN** they are removed automatically
+
+#### Scenario: Removing history keeps the record
+
+- **WHEN** all history entries of a synchronisation record have been removed by retention
+- **THEN** the record itself remains
+- **AND** its last successful synchronisation information is still available
+
+### Requirement: Synchronisation Operational Configuration
+
+The operational limits of synchronisation SHALL be configurable rather than fixed in code, with defaults suitable for a club-sized installation:
+
+- the number of consecutive failures after which a record stops being attempted (default 5),
+- the delay before the first retry, the growth of that delay per further failure, and its upper limit (defaults 15 minutes, doubling, 24 hours),
+- how long one synchronisation run holds a record before another run may take it (default 5 minutes),
+- how often the system looks for records that changed locally or are due for a retry (default every 15 minutes),
+- when the full comparison of every active record runs (default nightly),
+- how long synchronisation history is kept (default 30 days).
+
+#### Scenario: Limits are adjusted without a code change
+
+- **WHEN** an operator changes the number of consecutive failures allowed, a retry delay, a scan cadence or the retention period in configuration
+- **THEN** synchronisation follows the new values after a restart
+- **AND** no code change is required
+
+#### Scenario: Defaults apply when nothing is configured
+
+- **WHEN** no synchronisation configuration is provided
+- **THEN** the documented defaults apply
+
+### Requirement: One Synchronisation At A Time Per Record
+
+A synchronisation record SHALL be processed by only one synchronisation run at a time, so that a scheduled run and a run triggered by a user cannot act on the same record simultaneously. A hold placed on a record SHALL expire, so that a run interrupted by a restart does not block that record permanently. Records other than the held one SHALL remain available to other runs.
+
+#### Scenario: A user-triggered run does not collide with a scheduled one
+
+- **GIVEN** a scheduled synchronisation run is processing a record
+- **WHEN** a user asks for the same record to be synchronised
+- **THEN** the record is not processed twice at the same time
+
+#### Scenario: A user-triggered run proceeds for other records
+
+- **GIVEN** a scheduled synchronisation run is processing one record
+- **WHEN** a user asks for a different record to be synchronised
+- **THEN** that request is processed without waiting for the scheduled run to finish
+
+#### Scenario: An interrupted run does not block a record permanently
+
+- **GIVEN** a synchronisation run held a record and was interrupted by a restart
+- **WHEN** the hold expires
+- **THEN** the record is processed again by the next run
+
+### Requirement: Permissions Over Everything Or Over Specific Targets
+
+The system SHALL let a user hold a permission either over everything or only over specific targets (for example selected members). A permission held over everything also covers targets created later. An action that concerns a target SHALL be allowed when the user holds one of the permissions the action accepts, either over everything or over that target.
+
+#### Scenario: Permission over everything covers a newly created target
+
+- **GIVEN** a user holds a permission over all members
+- **WHEN** a new member is registered
+- **THEN** the user can perform the actions covered by that permission on the new member
+
+#### Scenario: Permission over specific targets is limited to them
+
+- **GIVEN** a user holds a permission only over member A
+- **WHEN** the user views member A and member B
+- **THEN** the actions covered by that permission are offered on member A
+- **AND** they are not offered on member B
+- **AND** an attempt to perform them on member B is refused
+
+#### Scenario: Any one of the accepted permissions is enough
+
+- **GIVEN** an action accepts permission X over everything or permission Y over its target
+- **WHEN** a user holding only Y over the target performs the action
+- **THEN** the action succeeds
+
+### Requirement: Permissions From Relationships Add Up
+
+The system SHALL derive permissions over specific targets from relationships between the user and the targets (for example ownership of a group). The system SHALL support adding new kinds of relationships, and the permissions coming from all relationships SHALL be combined. A permission held only because of a relationship SHALL end as soon as the relationship ends.
+
+#### Scenario: Two relationships to the same target
+
+- **GIVEN** a user is related to member A through two different relationships, each granting a different permission
+- **WHEN** the user views member A
+- **THEN** the user can use both permissions on member A
+
+#### Scenario: Ended relationship removes the permission
+
+- **GIVEN** a user holds a permission over member A only through one relationship
+- **WHEN** that relationship ends
+- **THEN** on the user's next action the permission over member A is no longer available
+
+### Requirement: Permissions Are Current For Every Request
+
+The system SHALL evaluate each request against the user's permissions as they are at the time of that request, not as they were at login. All authorization decisions made while handling one request SHALL be based on the same set of permissions.
+
+#### Scenario: Revoked permission stops working without re-login
+
+- **GIVEN** a logged-in user holds a permission
+- **WHEN** an administrator revokes that permission
+- **THEN** the user's next request is evaluated without it
+- **AND** the user does not need to log out and in again
+
+#### Scenario: One request uses one set of permissions
+
+- **WHEN** the system answers a single request
+- **THEN** the actions it offers, the fields it shows and the checks it enforces are all based on the same set of the user's permissions
+
+### Requirement: Offered Actions Match Enforced Checks
+
+The system SHALL offer an action (a form, button or link) to a user only when the user is allowed to perform it, and SHALL allow every action it offers. A form SHALL contain only fields the user may change; fields the user may see but not change SHALL be shown as read-only.
+
+#### Scenario: Offered action can be performed
+
+- **WHEN** the system offers an action to a user
+- **AND** the user performs it with valid input
+- **THEN** the action is not refused for lack of permission
+
+#### Scenario: Action not offered is refused
+
+- **WHEN** a user attempts an action the system did not offer them for lack of permission
+- **THEN** the system refuses the action
+
+#### Scenario: Field visible but not changeable is read-only in the form
+
+- **GIVEN** a user may see a field of a record but not change it
+- **WHEN** the user opens the edit form for that record
+- **THEN** the field is shown with its current value as read-only

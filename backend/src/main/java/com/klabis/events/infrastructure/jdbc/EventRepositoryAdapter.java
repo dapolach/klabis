@@ -21,15 +21,12 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 
 /**
@@ -101,17 +98,33 @@ class EventRepositoryAdapter implements EventRepository {
 
     @Override
     public Page<Event> findAll(EventFilter filter, Pageable pageable) {
+        if (filter.statuses().isEmpty()) {
+            return new PageImpl<>(List.of(), pageable, 0);
+        }
+
         List<UUID> preFilteredIds = resolvePreFilteredIds(filter);
 
         if (preFilteredIds != null && preFilteredIds.isEmpty()) {
             return new PageImpl<>(List.of(), pageable, 0);
         }
 
+        List<UUID> cancelledRegisteredIds = resolveCancelledRegisteredIds(filter);
+
         if (preFilteredIds != null) {
-            return findAllWithMatchingIds(filter, pageable, preFilteredIds);
+            return findAllWithMatchingIds(filter, pageable, preFilteredIds, cancelledRegisteredIds);
         }
 
-        return executeQuery(buildCriteriaQuery(filter), pageable);
+        return executeQuery(buildCriteriaQuery(filter, cancelledRegisteredIds), pageable);
+    }
+
+    /**
+     * Returns null when the visibility rule does not apply.
+     */
+    private List<UUID> resolveCancelledRegisteredIds(EventFilter filter) {
+        if (filter.cancelledVisibleTo() == null || filter.excludesStatus(EventStatus.CANCELLED)) {
+            return null;
+        }
+        return findIdsByCancelledAndRegistered(filter.cancelledVisibleTo());
     }
 
     /**
@@ -139,7 +152,7 @@ class EventRepositoryAdapter implements EventRepository {
                 : null;
 
         List<UUID> coordinatorIds = filter.coordinator() != null
-                ? findIdsByCoordinator(filter.coordinator())
+                ? findIdsCoordinatedBy(filter.coordinator()).stream().map(EventId::value).toList()
                 : null;
 
         List<List<UUID>> activeSets = new ArrayList<>();
@@ -161,10 +174,11 @@ class EventRepositoryAdapter implements EventRepository {
                 .orElse(List.of());
     }
 
-    private Page<Event> findAllWithMatchingIds(EventFilter filter, Pageable pageable, List<UUID> matchingIds) {
+    private Page<Event> findAllWithMatchingIds(EventFilter filter, Pageable pageable, List<UUID> matchingIds,
+                                              List<UUID> cancelledRegisteredIds) {
         List<Criteria> conditions = new ArrayList<>();
         conditions.add(Criteria.where("id").in(matchingIds));
-        conditions.addAll(buildNonFulltextConditions(filter));
+        conditions.addAll(buildNonFulltextConditions(filter, cancelledRegisteredIds));
 
         Criteria combined = conditions.stream().reduce(Criteria::and).orElseThrow();
         return executeQuery(Query.query(combined), pageable);
@@ -183,43 +197,12 @@ class EventRepositoryAdapter implements EventRepository {
         return new PageImpl<>(results, pageable, total);
     }
 
-    @Override
-    public Set<Integer> findImportedOrisIds(Collection<Integer> candidateOrisIds) {
-        if (candidateOrisIds.isEmpty()) {
-            return Set.of();
-        }
-        MapSqlParameterSource params = new MapSqlParameterSource("ids", candidateOrisIds);
-        List<Integer> found = namedJdbc.query(
-                "SELECT oris_id FROM events.events WHERE oris_id IN (:ids)",
-                params,
-                (rs, rowNum) -> rs.getInt(1)
-        );
-        return new HashSet<>(found);
-    }
-
-    @Override
-    public boolean existsByOrisId(int orisId) {
-        return jdbcRepository.existsByOrisId(orisId);
-    }
-
-    @Override
-    public List<Event> findAllUpcomingOrisEvents(LocalDate today) {
-        Criteria criteria = Criteria
-                .where("status").in(List.of(EventStatus.DRAFT.name(), EventStatus.ACTIVE.name()))
-                .and("event_date").greaterThanOrEquals(today)
-                .and("oris_id").isNotNull();
-        Iterable<EventMemento> mementos = jdbcAggregateTemplate.findAll(Query.query(criteria), EventMemento.class);
-        return StreamSupport.stream(mementos.spliterator(), false)
-                .map(EventMemento::toEvent)
-                .toList();
-    }
-
     /**
      * Builds a Criteria-based query from EventFilter (excluding fulltext — handled separately).
      * Pagination is applied separately so the same query can be reused for counting.
      */
-    private Query buildCriteriaQuery(EventFilter filter) {
-        List<Criteria> conditions = buildNonFulltextConditions(filter);
+    private Query buildCriteriaQuery(EventFilter filter, List<UUID> cancelledRegisteredIds) {
+        List<Criteria> conditions = buildNonFulltextConditions(filter, cancelledRegisteredIds);
 
         if (conditions.isEmpty()) {
             return Query.empty();
@@ -232,13 +215,14 @@ class EventRepositoryAdapter implements EventRepository {
     /**
      * Returns the Criteria conditions for filter dimensions handled by the Spring Data Criteria API.
      * Fulltext and registeredBy cannot be expressed via Criteria (require raw SQL) and are
-     * resolved separately via a pre-fetch of matching IDs.
+     * resolved separately via a pre-fetch of matching IDs. The CANCELLED-visibility rule is added
+     * here so no query path can forget it.
      */
-    private List<Criteria> buildNonFulltextConditions(EventFilter filter) {
+    private List<Criteria> buildNonFulltextConditions(EventFilter filter, List<UUID> cancelledRegisteredIds) {
         List<Criteria> conditions = new ArrayList<>();
 
         Set<EventStatus> statuses = filter.statuses();
-        if (!statuses.isEmpty()) {
+        if (statuses.size() < EventStatus.values().length) {
             List<String> statusNames = statuses.stream().map(EventStatus::name).toList();
             conditions.add(Criteria.where("status").in(statusNames));
         }
@@ -262,7 +246,23 @@ class EventRepositoryAdapter implements EventRepository {
             conditions.add(Criteria.where("event_type_id").in(typeIdValues));
         }
 
+        addCancelledVisibilityCondition(conditions, cancelledRegisteredIds);
+
         return conditions;
+    }
+
+    /**
+     * A disjunction, so it cannot join the pre-filtered id intersection.
+     */
+    private void addCancelledVisibilityCondition(List<Criteria> conditions, List<UUID> cancelledRegisteredIds) {
+        if (cancelledRegisteredIds == null) {
+            return;
+        }
+        // An empty id list would produce invalid `id IN ()`, so it degenerates to the status-only branch.
+        conditions.add(cancelledRegisteredIds.isEmpty()
+                ? Criteria.where("status").not(EventStatus.CANCELLED.name())
+                : Criteria.where("status").not(EventStatus.CANCELLED.name())
+                        .or(Criteria.where("id").in(cancelledRegisteredIds)));
     }
 
     /**
@@ -315,6 +315,19 @@ class EventRepositoryAdapter implements EventRepository {
         return namedJdbc.query(sql, params, (rs, rowNum) -> rs.getObject(1, UUID.class));
     }
 
+    private List<UUID> findIdsByCancelledAndRegistered(MemberId memberId) {
+        String sql = """
+                SELECT id FROM events.events e
+                WHERE e.status = 'CANCELLED'
+                  AND EXISTS (
+                    SELECT 1 FROM events.event_registrations er
+                    WHERE er.event_id = e.id AND er.member_id = :memberId
+                )
+                """;
+        MapSqlParameterSource params = new MapSqlParameterSource("memberId", memberId.uuid());
+        return namedJdbc.query(sql, params, (rs, rowNum) -> rs.getObject(1, UUID.class));
+    }
+
     /**
      * Returns IDs of events whose nearest future registration deadline falls within
      * {@code [today, deadlineUntil]} (both inclusive).
@@ -344,21 +357,11 @@ class EventRepositoryAdapter implements EventRepository {
         return namedJdbc.query(sql, params, (rs, rowNum) -> rs.getObject(1, UUID.class));
     }
 
-    /**
-     * Returns IDs of events where the given member is listed as a coordinator.
-     * Uses the event_coordinators join table — coordinator membership is an ordered
-     * collection so we use EXISTS against the join table, not a column comparison.
-     */
-    private List<UUID> findIdsByCoordinator(MemberId memberId) {
-        String sql = """
-                SELECT id FROM events.events e
-                WHERE EXISTS (
-                    SELECT 1 FROM events.event_coordinators c
-                    WHERE c.event_id = e.id AND c.member_id = :memberId
-                )
-                """;
+    @Override
+    public List<EventId> findIdsCoordinatedBy(MemberId memberId) {
+        String sql = "SELECT event_id FROM events.event_coordinators WHERE member_id = :memberId";
         MapSqlParameterSource params = new MapSqlParameterSource("memberId", memberId.uuid());
-        return namedJdbc.query(sql, params, (rs, rowNum) -> rs.getObject(1, UUID.class));
+        return namedJdbc.query(sql, params, (rs, rowNum) -> new EventId(rs.getObject(1, UUID.class)));
     }
 
     /**

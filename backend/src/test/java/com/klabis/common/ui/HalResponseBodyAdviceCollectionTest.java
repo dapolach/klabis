@@ -1,13 +1,12 @@
 package com.klabis.common.ui;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
+import com.klabis.common.CommonInfrastructureWebMvcSetup;
 import com.klabis.common.mvc.MvcComponent;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.hateoas.CollectionModel;
 import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.IanaLinkRelations;
@@ -32,9 +31,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * must be able to decorate the collection itself.
  */
 @WebMvcTest(controllers = HalResponseBodyAdviceCollectionTest.CollectionTestController.class)
-@Import(HalFormsSupport.class)
 @DisplayName("HalResponseBodyAdvice collection (List) handling")
-@WithPostprocessors
+@CommonInfrastructureWebMvcSetup
 class HalResponseBodyAdviceCollectionTest {
 
     @Autowired

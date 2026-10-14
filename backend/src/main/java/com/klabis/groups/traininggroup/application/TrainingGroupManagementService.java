@@ -1,12 +1,8 @@
 package com.klabis.groups.traininggroup.application;
 
-import com.klabis.groups.common.domain.GroupNotFoundException;
-import com.klabis.groups.common.domain.AgeRangeOverlap;
-import com.klabis.groups.common.domain.TrainingGroupFilter;
+import com.klabis.common.groups.domain.GroupNotFoundException;
 import com.klabis.groups.traininggroup.TrainingGroupId;
-import com.klabis.groups.traininggroup.domain.AgeRange;
-import com.klabis.groups.traininggroup.domain.TrainingGroup;
-import com.klabis.groups.traininggroup.domain.TrainingGroupRepository;
+import com.klabis.groups.traininggroup.domain.*;
 import com.klabis.members.ActiveMembersByAgeProvider;
 import com.klabis.members.MemberId;
 import org.jmolecules.ddd.annotation.Service;
@@ -14,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 @Service
 class TrainingGroupManagementService implements TrainingGroupManagementPort {
@@ -37,6 +34,12 @@ class TrainingGroupManagementService implements TrainingGroupManagementPort {
     @Override
     public TrainingGroup getTrainingGroup(TrainingGroupId id) {
         return loadTrainingGroup(id);
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public Optional<TrainingGroup> findTrainingGroupOfMember(MemberId memberId) {
+        return trainingGroupRepository.findOne(TrainingGroupFilter.all().withMemberIs(memberId));
     }
 
     @Transactional
@@ -105,7 +108,7 @@ class TrainingGroupManagementService implements TrainingGroupManagementPort {
                     throw new MemberAlreadyInTrainingGroupException(memberId, existing.getId());
                 });
         TrainingGroup group = loadTrainingGroup(id);
-        group.assignEligibleMember(memberId);
+        group.addTrainee(memberId);
         trainingGroupRepository.save(group);
     }
 

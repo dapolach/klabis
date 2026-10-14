@@ -3,19 +3,70 @@
 ## Purpose
 
 Covers the full lifecycle of club members: registration, viewing and editing member profiles, and suspending memberships. Defines what information is collected, who can see and edit it, and how the system guides users through each workflow.
-
 ## Requirements
-
 ### Requirement: Member Registration Flow
 
-The system SHALL process member registration by creating a user account and a member profile in a single flow.
+The system SHALL process member registration by creating a user account and a member profile in a single flow. Whether the new member is a minor (younger than 18 today) or an adult is determined from the date of birth, and the registration form switches its sections accordingly. A minor SHALL be registered together with at least one legal guardian; each guardian is either chosen from the legal guardian candidates or entered as a new non-member guardian in the same step. An adult SHALL be registered without legal guardians. A member registered by hand SHALL be complete; registration does not send any e-mail. If any part of the registration fails, nothing is created.
 
-#### Scenario: Admin registers a new member
+#### Scenario: Admin registers a new adult member
 
 - **WHEN** admin with MEMBERS:CREATE permission navigates to the registration page
-- **AND** submits the registration form with valid data
+- **AND** submits the registration form for an adult with valid data
 - **THEN** the new member appears in the member list
-- **AND** a welcome email is sent to the member's email address
+- **AND** a user account awaiting activation is created for the member
+- **AND** no e-mail is sent to the member
+
+#### Scenario: Admin registers a minor with an existing guardian
+
+- **WHEN** admin fills in a date of birth of a person younger than 18
+- **AND** chooses an adult member as the legal guardian and submits the form
+- **THEN** the minor appears in the member list
+- **AND** the chosen member is listed as the minor's legal guardian
+
+#### Scenario: Admin registers a minor with a new non-member guardian
+
+- **WHEN** admin registers a minor and enters a new guardian with first name, last name, e-mail and telephone
+- **THEN** the minor is registered with that guardian
+- **AND** the guardian gets a user account awaiting activation with a login number from the series EXT0001, EXT0002, …
+- **AND** no e-mail is sent to anyone
+
+#### Scenario: Admin registers a minor with two guardians
+
+- **WHEN** admin registers a minor with one existing member and one new non-member as guardians
+- **THEN** both are listed as the minor's legal guardians
+
+#### Scenario: Minor registered without guardians is rejected
+
+- **WHEN** admin submits the registration form for a minor without any legal guardian
+- **THEN** the form shows an error that a legal guardian is required for minors
+- **AND** no member is created
+
+#### Scenario: Adult registered with guardians is rejected
+
+- **WHEN** a registration of an adult is submitted together with legal guardians
+- **THEN** the registration is rejected with an error that adults cannot have legal guardians
+- **AND** no member is created
+
+#### Scenario: Registration form switches sections by date of birth
+
+- **WHEN** admin enters a date of birth of a person younger than 18
+- **THEN** the form shows the "Zákonní zástupci" section and marks the member's own e-mail and telephone as optional
+- **WHEN** admin changes the date of birth to a person aged 18 or older
+- **THEN** the "Zákonní zástupci" section is hidden and the member's own e-mail and telephone are required
+
+#### Scenario: Failed guardian creation leaves nothing behind
+
+- **WHEN** admin registers a minor with a new guardian whose e-mail is already in use
+- **THEN** the form shows an error that the e-mail is already in use
+- **AND** neither the member nor any guardian is created
+
+#### Scenario: Adult registration takes over an existing non-member guardian
+
+- **GIVEN** a non-member legal guardian "Eva Svobodová"
+- **WHEN** admin registers an adult member and chooses to take over "Eva Svobodová"
+- **THEN** the form is pre-filled with her name, e-mail and telephone
+- **AND** after submission she becomes a club member and remains the legal guardian of her minors
+- **AND** she keeps logging in with her login number EXTnnnn
 
 #### Scenario: Registration button not shown without permission
 
@@ -46,7 +97,7 @@ The system SHALL require the following personal information for all new members:
 
 ### Requirement: Registration Number Generation
 
-The system SHALL automatically assign a unique registration number in format XXXYYSS (club code + 2-digit birth year + 2-digit sequence).
+The system SHALL automatically assign a unique registration number in format XXXYYSS (club code + 2-digit birth year + 2-digit sequence), except where the member is registered with a registration number already issued elsewhere — as happens for a member brought in from ORIS, which issues the number identifying them across the whole sport. In that case the system SHALL adopt the number supplied and SHALL NOT assign one of its own.
 
 #### Scenario: Registration number assigned on first member for a birth year
 
@@ -62,6 +113,18 @@ The system SHALL automatically assign a unique registration number in format XXX
 
 - **WHEN** a member born in 2005 is registered after a member born in 2001
 - **THEN** the new member's registration number starts a fresh sequence for 2005 (e.g., ZBM0500)
+
+#### Scenario: A registration number issued elsewhere is adopted
+
+- **WHEN** a member is registered with a registration number already issued to them elsewhere
+- **THEN** they carry that registration number
+- **AND** no number is assigned from the club's own sequence
+
+#### Scenario: A registration number already in use is refused
+
+- **WHEN** a member is registered with a registration number another member already carries
+- **THEN** the registration is refused
+- **AND** no member is created
 
 ### Requirement: Birth Number Management
 
@@ -132,22 +195,21 @@ For Czech nationals, the system SHALL require a birth number (rodné číslo). T
 
 ### Requirement: Contact Information
 
-The system SHALL require at least one email address and one phone number — either from the member directly or from their legal guardian (for minors).
+The system SHALL require an e-mail address and a telephone number for every member. An adult member SHALL provide their own. For a minor the requirement is met by the minor's own contacts or by those of any of their legal guardians; the e-mail and the telephone MAY come from different people.
 
 #### Scenario: Adult member's own contact details required
 
 - **WHEN** adult member's registration form is filled
-- **THEN** an email address and phone number must be provided for the member
+- **THEN** an e-mail address and telephone number must be provided for the member
 
-#### Scenario: Minor member's guardian contact details required
+#### Scenario: Minor member's own contact details are optional
 
-- **WHEN** registration form is filled for a minor (under 18)
-- **THEN** an email address and phone number must be provided for the legal guardian
-- **AND** the member's own email and phone are optional
+- **WHEN** registration form is filled for a minor (under 18) with at least one legal guardian
+- **THEN** the member's own e-mail and telephone are optional
 
 #### Scenario: Missing contact information shows error
 
-- **WHEN** admin submits a registration form with no email or no phone for either member or guardian
+- **WHEN** admin submits a registration form for an adult without an e-mail or without a telephone
 - **THEN** the form shows an error indicating that contact information is required
 
 ### Requirement: Optional Member Data
@@ -203,28 +265,6 @@ The system SHALL allow an optional bank account number in IBAN or Czech domestic
 
 - **WHEN** user clears the bank account number field and saves
 - **THEN** the bank account is removed from the member profile
-
-### Requirement: Welcome Email on Registration
-
-When a new member is registered, the system SHALL send a welcome email containing the member's name, registration number, and an activation link valid for 72 hours.
-
-#### Scenario: Adult member receives welcome email
-
-- **WHEN** admin registers an adult member with an email address
-- **THEN** a welcome email is sent to that email address
-- **AND** the email contains an activation link that expires in 72 hours
-
-#### Scenario: Minor receives welcome email at guardian address
-
-- **WHEN** admin registers a minor without a member email address
-- **AND** guardian has an email address
-- **THEN** the welcome email is sent to the guardian's email address
-
-#### Scenario: Member without email does not receive welcome email
-
-- **WHEN** admin registers a member without any email address
-- **THEN** no welcome email is sent
-- **AND** the registration still succeeds
 
 ### Requirement: Authorization for Member Operations
 
@@ -394,7 +434,7 @@ The system SHALL display a paginated, sortable and filterable list of members. U
 
 ### Requirement: Member Detail
 
-The system SHALL display complete member details. Inactive members are not accessible to users without MEMBERS:MANAGE authority.
+The system SHALL display complete member details. Inactive members are not accessible to users without MEMBERS:MANAGE authority, except to users holding "Úprava údajů člena" over that member. The active/inactive status indicator on the detail page is only shown to users with MEMBERS:MANAGE authority.
 
 #### Scenario: Authorized user views active member detail
 
@@ -407,19 +447,26 @@ The system SHALL display complete member details. Inactive members are not acces
 - **WHEN** user with MEMBERS:MANAGE authority navigates to an inactive member's detail page
 - **THEN** the member detail is displayed including suspension reason, date, and note
 
+#### Scenario: Holder of profile editing views suspended member detail
+
+- **GIVEN** a user holds "Úprava údajů člena" over a member whose membership is suspended
+- **WHEN** the user navigates to that member's detail page
+- **THEN** the member detail is displayed
+- **AND** the "Upravit profil" action is available
+
 #### Scenario: Regular user cannot access inactive member detail
 
-- **WHEN** user without MEMBERS:MANAGE authority navigates to an inactive member's detail page
+- **WHEN** user without MEMBERS:MANAGE authority and without "Úprava údajů člena" over the member navigates to an inactive member's detail page
 - **THEN** the page shows a not-found error
 
 #### Scenario: Edit button shown to authorized user
 
-- **WHEN** user with MEMBERS:UPDATE permission views a member detail page
+- **WHEN** user with MEMBERS:UPDATE permission, or a user holding "Úprava údajů člena" over the member, views a member detail page
 - **THEN** an "Upravit profil" button is displayed
 
 #### Scenario: Edit button not shown without permission
 
-- **WHEN** user without MEMBERS:UPDATE permission views a member detail page
+- **WHEN** user without MEMBERS:UPDATE permission and without "Úprava údajů člena" over the member views a member detail page
 - **THEN** no edit button is shown for modifying the member's data
 
 #### Scenario: Permissions button shown to authorized user
@@ -437,6 +484,16 @@ The system SHALL display complete member details. Inactive members are not acces
 - **WHEN** user views a suspended member's detail page
 - **THEN** no "Ukončit členství" button is shown
 
+#### Scenario: Admin sees active/inactive status indicator
+
+- **WHEN** user with MEMBERS:MANAGE authority views a member's detail page
+- **THEN** an "Aktivní" or "Neaktivní" status indicator is shown next to the member's name
+
+#### Scenario: Regular user does not see active/inactive status indicator
+
+- **WHEN** user without MEMBERS:MANAGE authority views a member's detail page
+- **THEN** no active/inactive status indicator is shown next to the member's name
+
 ### Requirement: Member Detail Page Layout
 
 The member detail page SHALL use a two-column layout driven by the available PATCH template fields, without client-side role detection.
@@ -444,7 +501,7 @@ The member detail page SHALL use a two-column layout driven by the available PAT
 #### Scenario: Detail page with full template (admin or self)
 
 - **WHEN** member detail response includes a PATCH template
-- **THEN** the page renders in a two-column layout: left column (personal data, contact, address), right column (supplementary info, documents and licenses)
+- **THEN** the page renders in a two-column layout: left column (personal data, contact, legal guardians of a minor, address), right column (supplementary info, documents and licenses)
 - **AND** an "Upravit profil" button is shown
 
 #### Scenario: Detail page without template (other member)
@@ -452,6 +509,12 @@ The member detail page SHALL use a two-column layout driven by the available PAT
 - **WHEN** member detail response has no PATCH template
 - **THEN** only contact section and address section are displayed
 - **AND** no action buttons are shown
+
+#### Scenario: Minor views own detail without edit action
+
+- **WHEN** a minor views their own detail page
+- **THEN** the page shows all of the minor's data in the two-column layout
+- **AND** no "Upravit profil" button is shown
 
 #### Scenario: Admin detail shows action buttons with icons
 
@@ -464,14 +527,37 @@ The member detail page SHALL use a two-column layout driven by the available PAT
 - **THEN** the page header shows: "Členské příspěvky" button and "Upravit profil" button
 - **AND** "Oprávnění" and "Ukončit členství" buttons are NOT shown
 
+#### Scenario: Holder of profile editing sees edit button only
+
+- **WHEN** a user holding "Úprava údajů člena" over another member, without MEMBERS:MANAGE, views that member's detail page
+- **THEN** the page header shows the "Upravit profil" button
+- **AND** "Členské příspěvky", "Oprávnění" and "Ukončit členství" buttons are NOT shown
+
+#### Scenario: Legal guardians section on a minor's detail
+
+- **WHEN** an admin, the minor themself, or a user holding "Úprava údajů člena" over the minor views a minor's detail page
+- **THEN** a "Zákonní zástupci" section lists each guardian of the minor's legal guardian group with name, e-mail and telephone
+- **AND** only an admin sees the "Upravit zástupce" action in that section
+
+#### Scenario: Legal guardians section of a minor without guardians
+
+- **WHEN** an admin views the detail of a minor who has no legal guardian group
+- **THEN** the "Zákonní zástupci" section states that the minor has no legal guardian
+- **AND** the "Upravit zástupce" action is available
+
+#### Scenario: Other members do not see a minor's guardians
+
+- **WHEN** a member without MEMBERS:MANAGE permission and without "Úprava údajů člena" over the minor views another member's detail page
+- **THEN** no "Zákonní zástupci" section is shown
+
 #### Scenario: Group navigation buttons shown when member belongs to a group
 
 - **WHEN** the member detail response carries a `trainingGroup` HAL link
 - **THEN** the page header additionally shows a "Tréninková skupina" button (dumbbell icon, secondary style)
 - **AND** clicking it navigates the user to the linked training group detail page
-- **WHEN** the member detail response carries a `familyGroup` HAL link
-- **THEN** the page header additionally shows a "Rodina" button (heart icon, secondary style)
-- **AND** clicking it navigates the user to the linked family group detail page
+- **WHEN** the member detail response carries a `legalGuardianGroup` HAL link (admins only)
+- **THEN** the page header additionally shows a "Zákonní zástupci" button (heart icon, secondary style)
+- **AND** clicking it navigates the user to the linked legal guardian group detail page
 - **WHEN** the member detail response carries neither link
 - **THEN** neither group navigation button is shown
 - **AND** this rule applies uniformly to every view of the member detail page (admin view, self-profile view, any other variant)
@@ -487,6 +573,13 @@ Edit forms SHALL place action buttons at the bottom of the form.
 - **AND** admin edit shows a badge "Admin — editace všech polí" in the page header
 - **AND** in self-edit mode, fields not present in the template are displayed as read-only
 
+#### Scenario: Reserved fields are read-only for a holder of profile editing
+
+- **WHEN** a user holding "Úprava údajů člena" over a member, without MEMBERS:MANAGE, opens that member's edit form
+- **THEN** the form is pre-filled with the member's current data
+- **AND** first name, last name, date of birth, gender and birth number are shown with their values as read-only
+- **AND** saving the form does not attempt to change those fields
+
 ### Requirement: Member Registration Page Layout
 
 The member registration page SHALL use a two-column layout.
@@ -494,19 +587,50 @@ The member registration page SHALL use a two-column layout.
 #### Scenario: Registration page layout
 
 - **WHEN** admin navigates to member registration page
-- **THEN** the left column contains: personal data section, contact section, address section
+- **THEN** the left column contains: personal data section, contact section, legal guardians section (only for a minor), address section
 - **AND** the right column contains supplementary information section only (no documents or licenses)
 - **AND** "Zrušit" and "Registrovat člena" (user-plus icon) buttons appear at the bottom of the form
 
+#### Scenario: Legal guardians section lets admin choose or create guardians
+
+- **WHEN** admin works with the legal guardians section of the registration form
+- **THEN** they can add any number of guardians, each either chosen from the guardian candidates or entered as a new person with first name, last name, e-mail and telephone
+- **AND** they can remove a guardian from the list before submitting
+
 ### Requirement: Member Update
 
-The system SHALL allow members to update their own profile data, and admins to update any member's data. Field access is role-based.
+The system SHALL allow a member's data to be updated by a member administrator or by a user holding "Úprava údajů člena" over that member. Every adult member holds that permission over themself; a minor (under 18 years) does not, so a minor cannot update their own profile. Field access is role-based: the administrator-reserved fields can be changed only by a member administrator. Legal guardians are not part of the member edit form; they are managed separately on the minor's detail page.
 
 #### Scenario: Member updates their own information
 
-- **WHEN** authenticated member edits their own profile and saves the changes
+- **WHEN** authenticated adult member edits their own profile and saves the changes
 - **THEN** the updated information is saved
 - **AND** the member is taken to their updated profile
+
+#### Scenario: Minor cannot edit own profile
+
+- **WHEN** a minor member views their own profile
+- **THEN** the "Upravit" action is not displayed
+- **AND** an attempt to save changes to their own profile is refused with a permission denied error
+- **AND** no changes are saved
+
+#### Scenario: Admin updates a minor's information
+
+- **WHEN** user with MEMBERS:UPDATE permission edits a minor member's profile and saves the changes
+- **THEN** the updated information is saved
+
+#### Scenario: Holder of profile editing updates another member's information
+
+- **GIVEN** a user holds "Úprava údajů člena" over a member
+- **WHEN** the user edits that member's profile and saves the changes
+- **THEN** the updated information is saved
+- **AND** the change history records the user as the author of the change
+
+#### Scenario: Member can edit own profile after turning 18
+
+- **GIVEN** a member who was a minor and has turned 18
+- **WHEN** the member views their own profile
+- **THEN** the "Upravit" action is displayed
 
 #### Scenario: Admin updates a member's information
 
@@ -515,7 +639,7 @@ The system SHALL allow members to update their own profile data, and admins to u
 
 #### Scenario: Member cannot edit another member's profile
 
-- **WHEN** authenticated member attempts to edit a different member's profile without admin permission
+- **WHEN** authenticated member attempts to edit a different member's profile without admin permission and without "Úprava údajů člena" over that member
 - **THEN** the system shows a permission denied error
 - **AND** no changes are saved
 
@@ -527,8 +651,8 @@ The system SHALL allow members to update their own profile data, and admins to u
 
 #### Scenario: Member-editable fields
 
-- **WHEN** a member (without admin permission) opens their own edit form
-- **THEN** the form shows fields: email, phone, address, chip number, nationality, bank account, guardian contact, identity card, driving license, medical course, trainer license, dietary restrictions
+- **WHEN** an adult member (without admin permission) opens their own edit form, or a holder of "Úprava údajů člena" opens the edit form of a member they hold it over
+- **THEN** the form shows fields: email, phone, address, chip number, nationality, bank account, identity card, driving license, medical course, trainer license, dietary restrictions
 
 #### Scenario: Admin-only fields
 
@@ -549,8 +673,14 @@ The system SHALL allow members to update their own profile data, and admins to u
 
 #### Scenario: Contact removal prevented
 
-- **WHEN** member submits an update that would remove all email addresses (own and guardian)
+- **WHEN** an adult member submits an update that would remove their e-mail address
 - **THEN** the form shows an error that at least one email is required
+
+#### Scenario: Minor's own contact can be removed when a guardian covers it
+
+- **GIVEN** a minor whose legal guardian has an e-mail address
+- **WHEN** an admin removes the minor's own e-mail and saves
+- **THEN** the change is saved
 
 #### Scenario: Changing nationality to Czech enables birth number field
 
@@ -687,3 +817,170 @@ The system SHALL allow users with MEMBERS:UPDATE permission to suspend a member'
 
 - **WHEN** user without MEMBERS:UPDATE permission views an active member's detail page
 - **THEN** no "Ukončit členství" button is shown
+
+### Requirement: Incomplete Member Data
+
+A member brought in from ORIS may lack details that registering by hand requires; minors from ORIS never have legal guardians. The system SHALL treat a member as incomplete when any of the following is true:
+
+- an adult member has no own e-mail address; a minor has none and none of their legal guardians has one;
+- an adult member has no own telephone number; a minor has none and none of their legal guardians has one;
+- the member is a Czech national without a birth number;
+- the member is a minor without a legal guardian;
+- the member has no complete address (street, city, postal code and country).
+
+Completeness SHALL always follow from the member's current details and their legal guardians and SHALL never be set or cleared by hand. The member list mark and the "Jen neúplní" filter reflect the member's completeness as of the member's last save or the day they turned 18; they MAY lag behind later changes of the member's guardians or of the guardians' contacts, while the member detail always shows the current state. Only users with MEMBERS:MANAGE authority SHALL see whether a member is incomplete and what is missing.
+
+#### Scenario: Admin sees which members are incomplete
+
+- **WHEN** user with MEMBERS:MANAGE authority views the member list
+- **THEN** each incomplete member's row is marked "Neúplné údaje"
+- **AND** complete members carry no such mark
+
+#### Scenario: Admin filters the list to incomplete members
+
+- **WHEN** user with MEMBERS:MANAGE authority turns on the "Jen neúplní" filter in the member list
+- **THEN** only incomplete members are shown
+- **AND** the filter combines with the other list filters
+
+#### Scenario: Admin sees what is missing on the member detail
+
+- **WHEN** user with MEMBERS:MANAGE authority opens the detail of an incomplete member
+- **THEN** a warning lists each missing item, for example "Chybí: rodné číslo, zákonný zástupce"
+- **AND** the "Upravit profil" button lets them fill the details in
+
+#### Scenario: Regular user sees nothing about completeness
+
+- **WHEN** user without MEMBERS:MANAGE authority views the member list or a member's detail
+- **THEN** no incompleteness mark, filter or warning is shown
+
+#### Scenario: Minor imported from ORIS lacks a guardian
+
+- **WHEN** a minor is brought in from ORIS
+- **THEN** the minor is marked incomplete with a missing legal guardian
+
+#### Scenario: Adding a guardian makes the minor complete
+
+- **GIVEN** an incomplete minor whose only missing item is a legal guardian
+- **WHEN** an admin sets a guardian with an e-mail address and telephone number on the minor's detail page
+- **THEN** the minor's detail no longer lists any missing item
+
+#### Scenario: Guardian without contact does not cover the minor's contact
+
+- **GIVEN** a minor without own contacts whose only guardian is a member without a telephone
+- **WHEN** an admin opens the minor's detail
+- **THEN** the warning lists a missing telephone
+
+#### Scenario: A minor becomes an adult
+
+- **GIVEN** a minor who has no own e-mail and whose guardian has an e-mail
+- **WHEN** they turn 18
+- **THEN** their detail no longer lists legal guardians
+- **AND** their detail lists a missing e-mail
+
+### Requirement: Edits Never Leave A Member Less Complete
+
+Editing a member in Klabis SHALL NOT remove a detail whose absence would make the member incomplete. An incomplete member MAY be saved while still incomplete, as long as the edit does not add a new missing item. This keeps members who are complete today complete, while letting administrators fill in imported members step by step. The only exception is a corrected date of birth that turns an adult into a minor: the change is saved and the member becomes incomplete until a legal guardian is set.
+
+#### Scenario: Complete member cannot lose a required detail
+
+- **GIVEN** a complete Czech member
+- **WHEN** an admin clears the member's birth number and saves
+- **THEN** the form shows an error that the birth number is required
+- **AND** no changes are saved
+
+#### Scenario: Incomplete member can be edited without completing everything
+
+- **GIVEN** a member missing both a birth number and a legal guardian
+- **WHEN** an admin fills in only the birth number and saves
+- **THEN** the change is saved
+- **AND** the member remains incomplete with only the guardian missing
+
+#### Scenario: Unrelated edit on an incomplete member is saved
+
+- **GIVEN** a member missing a telephone number
+- **WHEN** an admin changes only the member's address and saves
+- **THEN** the change is saved
+- **AND** the member remains incomplete
+
+#### Scenario: Incomplete member cannot lose another required detail
+
+- **GIVEN** a member missing a telephone number but holding an e-mail address
+- **WHEN** an admin removes the e-mail address and saves
+- **THEN** the form shows an error that contact information is required
+- **AND** no changes are saved
+
+#### Scenario: Correcting the date of birth of an adult to a minor
+
+- **GIVEN** a complete adult member without legal guardians
+- **WHEN** an admin changes the date of birth so that the member is younger than 18 and saves
+- **THEN** the change is saved
+- **AND** the member is marked incomplete with a missing legal guardian
+- **AND** the "Upravit zástupce" action becomes available on the member's detail
+
+### Requirement: Creating A Minor's Own Account
+
+A minor SHALL NOT be able to activate their user account by themself. A user with MEMBERS:MANAGE permission MAY decide that a minor gets their own login by using the "Založit účet" action on the minor's detail page, which sends an activation link to the minor's own e-mail. The action is offered only for a minor whose account still awaits activation and who has an own e-mail. After turning 18 the member activates their account as any adult member.
+
+#### Scenario: Admin creates an account for a minor
+
+- **GIVEN** a minor with an own e-mail whose account awaits activation
+- **WHEN** an admin clicks "Založit účet" on the minor's detail page
+- **THEN** an activation link is sent to the minor's own e-mail
+- **AND** the page confirms that the link was sent
+
+#### Scenario: Action hidden for a minor without own e-mail
+
+- **WHEN** an admin opens the detail of a minor without an own e-mail
+- **THEN** no "Založit účet" action is shown
+
+#### Scenario: Action hidden for an activated account or an adult
+
+- **WHEN** an admin opens the detail of a minor whose account is already active, or the detail of an adult member
+- **THEN** no "Založit účet" action is shown
+
+#### Scenario: Action hidden without MEMBERS:MANAGE
+
+- **WHEN** a user without MEMBERS:MANAGE permission opens a minor's detail page
+- **THEN** no "Založit účet" action is shown
+
+### Requirement: Member Profile Editing Permission
+
+The system SHALL provide the permission "Úprava údajů člena", which is held over individual members and arises only from relationships: every adult member holds it over themself, and groups may delegate it to their owners. It SHALL NOT be grantable in the permissions dialog. Holding MEMBERS:MANAGE does not imply it.
+
+#### Scenario: Adult member holds the permission over themself
+
+- **WHEN** an adult member opens their own detail page
+- **THEN** the "Upravit profil" action is available
+
+#### Scenario: Minor does not hold the permission over themself
+
+- **WHEN** a minor opens their own detail page
+- **THEN** all of their own data is shown
+- **AND** the "Upravit profil" action is not available
+
+#### Scenario: Permission is not offered in the permissions dialog
+
+- **WHEN** an administrator opens the permissions dialog of a member
+- **THEN** "Úprava údajů člena" is not among the offered permissions
+
+#### Scenario: Holder over one member cannot edit another
+
+- **GIVEN** a user holds "Úprava údajů člena" over member A only
+- **WHEN** the user opens the detail page of member B
+- **THEN** the "Upravit profil" action is not available for member B
+
+### Requirement: Holder Of Profile Editing Sees All Member Data
+
+The system SHALL show a user holding "Úprava údajů člena" over a member all of that member's data, including the administrator-reserved data (first name, last name, date of birth, gender, birth number), health-related data such as dietary restrictions, and the minor's legal guardians. Viewing a birth number SHALL be audited for such a user in the same way as for an administrator.
+
+#### Scenario: Holder sees reserved and sensitive data
+
+- **GIVEN** a user holds "Úprava údajů člena" over a member
+- **WHEN** the user opens that member's detail page
+- **THEN** the birth number, date of birth, gender and dietary restrictions of the member are displayed
+
+#### Scenario: Holder's view of a birth number is audited
+
+- **GIVEN** a user holds "Úprava údajů člena" over a member with a birth number
+- **WHEN** the user opens that member's detail page
+- **THEN** the system records an audit log entry that the user accessed the member's birth number

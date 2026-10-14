@@ -4,11 +4,12 @@ import {MemoryRouter} from 'react-router-dom';
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query';
 import {HalFormProvider} from '../../contexts/HalFormContext';
 import {HalFormsPageLayout} from '../../components/HalNavigator2/HalFormsPageLayout';
-import {useHalPageData} from '../../hooks/useHalPageData';
 import type {UseHalPageDataReturn} from '../../hooks/useHalPageData';
+import {useHalPageData} from '../../hooks/useHalPageData';
 import {useAuthorizedQuery} from '../../hooks/useAuthorizedFetch';
 import {mockHalFormsTemplate} from '../../__mocks__/halData';
 import {EventDetailPage} from './EventDetailPage';
+import {labels} from '../../localization';
 import {vi} from 'vitest';
 import type {HalResponse} from '../../api';
 
@@ -25,6 +26,78 @@ vi.mock('../../hooks/useHalPageData', () => ({
     useHalPageData: vi.fn(),
 }));
 
+const {dialogFixtures, resolveDialogQueryData} = vi.hoisted(() => {
+    const dialogCategoryOptions = {inline: [{value: 'cat-2', prompt: 'D21'}]};
+    const registrationWriteTemplate = (target: string) => ({
+        method: 'PUT',
+        target,
+        title: 'Upravit přihlášku',
+        properties: [
+            {name: 'siCardNumber', prompt: 'SI čip', type: 'text', required: true, regex: '\\d{4,8}'},
+            {name: 'categoryId', prompt: 'Kategorie', type: 'text', options: dialogCategoryOptions},
+        ],
+    });
+    const dialogFixtures = {
+        dialogEventData: {
+            name: 'Jarní závod 2025',
+            eventDate: '2025-04-15',
+            location: 'Brno - Bystrc',
+            deadlines: ['2025-01-15'],
+            sharedTransportEnabled: true,
+            sharedAccommodationEnabled: true,
+            _links: {self: {href: 'http://localhost:8443/api/events/1'}},
+        },
+        dialogEditRegistrationData: {
+            siCardNumber: '7654321',
+            firstName: 'Jana',
+            lastName: 'Nováková',
+            category: {id: 'cat-2', name: 'D21'},
+            wantsSharedTransport: true,
+            wantsSharedAccommodation: false,
+            _links: {
+                self: {href: 'http://localhost:8443/api/events/1/registrations/member-1'},
+                event: {href: 'http://localhost:8443/api/events/1'},
+            },
+            _templates: {
+                editRegistration: registrationWriteTemplate('http://localhost:8443/api/events/1/registrations/member-1'),
+            },
+        },
+        dialogPrefillRegistrationData: {
+            siCardNumber: '1234567',
+            firstName: 'Jana',
+            lastName: 'Nováková',
+            wantsSharedTransport: false,
+            wantsSharedAccommodation: false,
+            _links: {
+                self: {href: 'http://localhost:8443/api/events/1/registrations/M001?newRegistration=true'},
+                event: {href: 'http://localhost:8443/api/events/1'},
+            },
+            _templates: {
+                registerForEvent: {
+                    method: 'POST',
+                    target: 'http://localhost:8443/api/events/1/registrations',
+                    title: 'Přihlásit se',
+                    properties: [
+                        {name: 'siCardNumber', prompt: 'SI čip', type: 'text', required: true, regex: '\\d{4,8}'},
+                        {name: 'categoryId', prompt: 'Kategorie', type: 'text', required: true, options: dialogCategoryOptions},
+                    ],
+                },
+            },
+        },
+    };
+    const resolveDialogQueryData = (url: string): unknown => {
+        if (url.includes('newRegistration=true')) return dialogFixtures.dialogPrefillRegistrationData;
+        if (url.includes('/registrations/member-1')) return dialogFixtures.dialogEditRegistrationData;
+        if (url === 'http://localhost:8443/api/events/1') return dialogFixtures.dialogEventData;
+        return {
+            _embedded: {registrationDtoList: []},
+            page: {totalElements: 0, totalPages: 0, size: 10, number: 0},
+            _links: {self: {href: url}},
+        };
+    };
+    return {dialogFixtures, resolveDialogQueryData};
+});
+
 vi.mock('../../hooks/useAuthorizedFetch', () => ({
     useAuthorizedMutation: vi.fn(() => ({
         mutate: vi.fn(),
@@ -32,21 +105,51 @@ vi.mock('../../hooks/useAuthorizedFetch', () => ({
         isPending: false,
         error: null,
     })),
-    useAuthorizedQuery: vi.fn((_key: unknown, url: string) => ({
-        data: {
-            _embedded: {registrationDtoList: []},
-            page: {totalElements: 0, totalPages: 0, size: 10, number: 0},
-            _links: {self: {href: url}},
-        },
+    useAuthorizedQuery: vi.fn((url: string) => ({
+        data: resolveDialogQueryData(url),
         isLoading: false,
         error: null,
     })),
 }));
 
+vi.mock('../../api/authorizedFetch', () => {
+    const okJson = (data: unknown) => Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers(),
+        json: async () => data,
+        clone() { return this; },
+    } as unknown as Response);
+
+    return {
+        authorizedFetch: vi.fn((url: string, options?: RequestInit) => {
+            if (options?.method) return okJson({});
+            if (url.includes('newRegistration=true')) return okJson(dialogFixtures.dialogPrefillRegistrationData);
+            if (url.includes('/registrations/member-1')) return okJson(dialogFixtures.dialogEditRegistrationData);
+            if (url.includes('/api/events/1')) return okJson(dialogFixtures.dialogEventData);
+            return okJson({});
+        }),
+    };
+});
+
 vi.mock('../../hooks/useFormCacheInvalidation', () => ({
     useFormCacheInvalidation: vi.fn(() => ({
         invalidateAllCaches: vi.fn().mockResolvedValue(undefined),
     })),
+}));
+
+// HalFormDisplay pulls prefill data via useHalFormData (OPTIONS probe + a query
+// keyed on the template target). The blanket useAuthorizedQuery mock would answer
+// that query with an empty registrations list, so pin useHalFormData to the
+// resource data the dialog already handed it.
+vi.mock('../../hooks/useHalFormData', () => ({
+    useHalFormData: (_template: unknown, resourceData: Record<string, unknown>) => ({
+        formData: resourceData ?? {},
+        isLoadingTargetData: false,
+        targetFetchError: null,
+        refetchTargetData: vi.fn(),
+    }),
 }));
 
 vi.mock('../../contexts/ToastContext', () => ({
@@ -87,11 +190,20 @@ vi.mock('../../api/hateoas', () => ({
 }));
 
 vi.mock('../../components/UI/Modal.tsx', () => ({
-    Modal: ({isOpen, children, onClose, title}: {isOpen: boolean; children: React.ReactNode; onClose: () => void; title?: string}) => (
+    Modal: ({isOpen, children, onClose, title, footer, footerNote}: {
+        isOpen: boolean;
+        children: React.ReactNode;
+        onClose: () => void;
+        title?: string;
+        footer?: React.ReactNode;
+        footerNote?: React.ReactNode;
+    }) => (
         isOpen ? (
             <div data-testid="modal-overlay" role="dialog">
                 {title && <h4>{title}</h4>}
                 {children}
+                {footerNote}
+                {footer}
                 <button onClick={onClose}>Close</button>
             </div>
         ) : null
@@ -189,6 +301,11 @@ describe('EventDetailPage', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mockNavigate.mockReset();
+        vi.mocked(useAuthorizedQuery).mockImplementation((url: string) => ({
+            data: resolveDialogQueryData(url),
+            isLoading: false,
+            error: null,
+        }) as unknown as ReturnType<typeof useAuthorizedQuery>);
     });
 
     it('renders back link to events list', () => {
@@ -311,10 +428,14 @@ describe('EventDetailPage', () => {
             expect(screen.queryByRole('button', {name: /ukončit akci/i})).not.toBeInTheDocument();
         });
 
-        it('shows registerForEvent button when template exists', () => {
+        it('shows registerForEvent button when newRegistration link exists', () => {
             const data = mockEventDetailData({
                 _templates: {
                     registerForEvent: mockHalFormsTemplate({title: 'Přihlásit se'}),
+                },
+                _links: {
+                    ...mockEventDetailData()._links,
+                    newRegistration: {href: '/api/events/evt-1/registrations/member-1?newRegistration=true'},
                 },
             });
             renderPage(createMockPageData(data));
@@ -700,6 +821,60 @@ describe('EventDetailPage', () => {
             });
         });
 
+        describe('shared service choice columns (show-shared-services-in-registrations)', () => {
+            const rowWithChoices = (memberId: string, lastName: string, wantsTransport: boolean, wantsAccommodation: boolean) =>
+                buildRegistrationRow(memberId, {lastName, wantsSharedTransport: wantsTransport, wantsSharedAccommodation: wantsAccommodation});
+
+            it('shows both columns with Ano/Ne per registration when both offers are enabled', () => {
+                renderPageWithRegistrationRows(
+                    [
+                        rowWithChoices('member-1', 'Nováková', true, false),
+                        rowWithChoices('member-2', 'Dvořák', false, true),
+                    ],
+                    {sharedTransportEnabled: true, sharedAccommodationEnabled: true},
+                );
+
+                expect(screen.getByRole('columnheader', {name: 'Nabídnout společnou dopravu'})).toBeInTheDocument();
+                expect(screen.getByRole('columnheader', {name: 'Nabídnout společné ubytování'})).toBeInTheDocument();
+                const rowFor = (lastName: string) =>
+                    screen.getAllByRole('row').find((row) => row.textContent?.includes(lastName));
+                expect(rowFor('Nováková')?.textContent).toContain('Ano');
+                expect(rowFor('Nováková')?.textContent).toContain('Ne');
+                expect(rowFor('Dvořák')?.textContent).toContain('Ne');
+                expect(rowFor('Dvořák')?.textContent).toContain('Ano');
+            });
+
+            it('shows shared transport column only when only transport is enabled', () => {
+                renderPageWithRegistrationRows(
+                    [rowWithChoices('member-1', 'Nováková', true, false)],
+                    {sharedTransportEnabled: true, sharedAccommodationEnabled: false},
+                );
+
+                expect(screen.getByRole('columnheader', {name: 'Nabídnout společnou dopravu'})).toBeInTheDocument();
+                expect(screen.queryByRole('columnheader', {name: 'Nabídnout společné ubytování'})).not.toBeInTheDocument();
+            });
+
+            it('shows shared accommodation column only when only accommodation is enabled', () => {
+                renderPageWithRegistrationRows(
+                    [rowWithChoices('member-1', 'Nováková', false, true)],
+                    {sharedTransportEnabled: false, sharedAccommodationEnabled: true},
+                );
+
+                expect(screen.getByRole('columnheader', {name: 'Nabídnout společné ubytování'})).toBeInTheDocument();
+                expect(screen.queryByRole('columnheader', {name: 'Nabídnout společnou dopravu'})).not.toBeInTheDocument();
+            });
+
+            it('shows no shared service columns when neither offer is enabled', () => {
+                renderPageWithRegistrationRows(
+                    [rowWithChoices('member-1', 'Nováková', true, true)],
+                    {sharedTransportEnabled: false, sharedAccommodationEnabled: false},
+                );
+
+                expect(screen.queryByRole('columnheader', {name: 'Nabídnout společnou dopravu'})).not.toBeInTheDocument();
+                expect(screen.queryByRole('columnheader', {name: 'Nabídnout společné ubytování'})).not.toBeInTheDocument();
+            });
+        });
+
         const buildRegistrationRow = (memberId = 'member-1', overrides?: Record<string, unknown>) => ({
             firstName: 'Jana',
             lastName: 'Nováková',
@@ -721,8 +896,13 @@ describe('EventDetailPage', () => {
                 _embedded: {registrationDtoList: rows},
                 page: {totalElements: rows.length, totalPages: 1, size: 10, number: 0},
             };
-            vi.mocked(useAuthorizedQuery)
-                .mockReturnValue({data: registrationsListData, error: null} as unknown as ReturnType<typeof useAuthorizedQuery>);
+            vi.mocked(useAuthorizedQuery).mockImplementation((url: string) => ({
+                data: url.includes('newRegistration=true') || url.includes('/registrations/member-1')
+                    ? resolveDialogQueryData(url)
+                    : registrationsListData,
+                isLoading: false,
+                error: null,
+            }) as unknown as ReturnType<typeof useAuthorizedQuery>);
             return renderPage(createMockPageData(resourceData));
         };
 
@@ -745,7 +925,20 @@ describe('EventDetailPage', () => {
                 expect(screen.queryByRole('button', {name: /upravit přihlášku/i})).not.toBeInTheDocument();
             });
 
-            it('opens modal with HalFormDisplay when row edit button is clicked', () => {
+            it('shows Detail action instead of edit on a row with registration link and no edit template', () => {
+                renderPageWithRegistrationRows([buildRegistrationRow()]);
+                expect(screen.getByRole('button', {name: labels.templates.showRegistrationDetail})).toBeInTheDocument();
+            });
+
+            it('does not show Detail action on a row with an edit template', () => {
+                const row = buildRegistrationRow('member-1', {
+                    _templates: {editRegistration: mockHalFormsTemplate({method: 'PUT', title: 'Upravit přihlášku'})},
+                });
+                renderPageWithRegistrationRows([row]);
+                expect(screen.queryByRole('button', {name: labels.templates.showRegistrationDetail})).not.toBeInTheDocument();
+            });
+
+            it('opens EventRegistrationDialog with prefilled values when row edit button is clicked', async () => {
                 const row = buildRegistrationRow('member-1', {
                     _templates: {editRegistration: mockHalFormsTemplate({method: 'PUT', title: 'Upravit přihlášku'})},
                 });
@@ -754,7 +947,8 @@ describe('EventDetailPage', () => {
                 fireEvent.click(screen.getByRole('button', {name: /upravit přihlášku/i}));
 
                 expect(screen.getByRole('dialog')).toBeInTheDocument();
-                expect(screen.getByTestId('hal-forms-display')).toBeInTheDocument();
+                expect(await screen.findByLabelText(/SI čip/)).toBeInTheDocument();
+                expect(screen.getByRole('button', {name: labels.events.registrationModal.confirmEdit})).toBeInTheDocument();
             });
         });
 
@@ -890,32 +1084,14 @@ describe('EventDetailPage', () => {
     });
 
     describe('edit own registration button (Group 6)', () => {
-        it('shows editRegistration button when editRegistration template exists on root resource', () => {
+        it('no longer renders a toolbar editRegistration button (editing moved to registration rows)', () => {
             const data = mockEventDetailData({
                 _templates: {
                     editRegistration: mockHalFormsTemplate({method: 'PUT', title: 'Upravit přihlášku'}),
                 },
             });
             renderPage(createMockPageData(data));
-            expect(screen.getByRole('button', {name: /upravit přihlášku/i})).toBeInTheDocument();
-        });
-
-        it('does not show editRegistration button when editRegistration template is absent', () => {
-            renderPage(createMockPageData(mockEventDetailData()));
             expect(screen.queryByRole('button', {name: /upravit přihlášku/i})).not.toBeInTheDocument();
-        });
-
-        it('opens modal with HalFormDisplay when editRegistration button is clicked', () => {
-            const data = mockEventDetailData({
-                _templates: {
-                    editRegistration: mockHalFormsTemplate({method: 'PUT', title: 'Upravit přihlášku'}),
-                },
-            });
-            renderPage(createMockPageData(data));
-
-            fireEvent.click(screen.getByRole('button', {name: /upravit přihlášku/i}));
-
-            expect(screen.getByRole('dialog')).toBeInTheDocument();
         });
     });
 
@@ -946,6 +1122,146 @@ describe('EventDetailPage', () => {
             renderPage(createMockPageData(data));
             const link = screen.getByRole('link', {name: /seznam pro ubytování/i});
             expect(link).toHaveAttribute('href', '/events/1/accommodation-list');
+        });
+    });
+
+    describe('shared services — inline edit checkboxes (6.1)', () => {
+        const updateEventTemplateWithSharedFlags = mockHalFormsTemplate({
+            method: 'PUT',
+            target: '/api/events/1',
+            title: 'Upravit závod',
+            properties: [
+                {name: 'name', prompt: 'Název', type: 'text', required: true, value: 'Jarní závod 2025'},
+                {name: 'eventDate', prompt: 'Datum konání', type: 'date', required: true, value: '2025-04-15'},
+                {name: 'sharedTransportEnabled', type: 'Boolean'},
+                {name: 'sharedAccommodationEnabled', type: 'Boolean'},
+            ],
+        });
+
+        it('renders both shared-service checkboxes in edit mode when the template has the properties', () => {
+            const data = mockEventDetailData({
+                _templates: {updateEvent: updateEventTemplateWithSharedFlags},
+            });
+            renderPage(createMockPageData(data));
+
+            fireEvent.click(screen.getByRole('button', {name: /upravit/i}));
+
+            expect(screen.getByText('Nabídnout společnou dopravu')).toBeInTheDocument();
+            expect(screen.getByText('Nabídnout společné ubytování')).toBeInTheDocument();
+            expect(screen.getAllByRole('checkbox')).toHaveLength(2);
+        });
+
+        it('does not render the shared-service checkboxes when the template omits the properties', () => {
+            const templateWithoutSharedFlags = mockHalFormsTemplate({
+                method: 'PUT',
+                target: '/api/events/1',
+                title: 'Upravit závod',
+                properties: [
+                    {name: 'name', prompt: 'Název', type: 'text', required: true, value: 'Jarní závod 2025'},
+                    {name: 'eventDate', prompt: 'Datum konání', type: 'date', required: true, value: '2025-04-15'},
+                ],
+            });
+            const data = mockEventDetailData({
+                _templates: {updateEvent: templateWithoutSharedFlags},
+            });
+            renderPage(createMockPageData(data));
+
+            fireEvent.click(screen.getByRole('button', {name: /upravit/i}));
+
+            expect(screen.queryByText('Nabídnout společnou dopravu')).not.toBeInTheDocument();
+            expect(screen.queryByText('Nabídnout společné ubytování')).not.toBeInTheDocument();
+        });
+    });
+
+    describe('SI policy', () => {
+        it.each([
+            ['REQUIRED', 'Povinný'],
+            ['OPTIONAL', 'Volitelný'],
+            ['NOT_USED', 'Nepoužívá se'],
+        ])('shows SI usage %s as "%s"', (siUsage, label) => {
+            renderPage(createMockPageData(mockEventDetailData({siUsage, siRentalAllowed: false})));
+
+            expect(screen.getByText('Použití SI čipu')).toBeInTheDocument();
+            expect(screen.getByText(label)).toBeInTheDocument();
+        });
+
+        it('shows whether rental is available when SI is used', () => {
+            renderPage(createMockPageData(mockEventDetailData({siUsage: 'OPTIONAL', siRentalAllowed: true})));
+
+            expect(screen.getByText('Půjčení čipu povoleno')).toBeInTheDocument();
+        });
+
+        it('does not show rental when SI is not used', () => {
+            renderPage(createMockPageData(mockEventDetailData({siUsage: 'NOT_USED', siRentalAllowed: false})));
+
+            expect(screen.queryByText('Půjčení čipu povoleno')).not.toBeInTheDocument();
+        });
+
+        it('offers SI usage select and rental tick box in edit mode reflecting current values', () => {
+            const template = mockHalFormsTemplate({
+                method: 'PUT',
+                target: '/api/events/1',
+                title: 'Upravit závod',
+                properties: [
+                    {name: 'name', prompt: 'Název', type: 'text', required: true, value: 'Jarní závod 2025'},
+                    {name: 'siUsage', type: 'SiUsage', options: {inline: ['NOT_USED', 'OPTIONAL', 'REQUIRED']}, value: 'REQUIRED'},
+                    {name: 'siRentalAllowed', type: 'Boolean', value: 'true'},
+                ],
+            });
+            renderPage(createMockPageData(mockEventDetailData({
+                siUsage: 'REQUIRED', siRentalAllowed: true, _templates: {updateEvent: template},
+            })));
+
+            fireEvent.click(screen.getByRole('button', {name: /upravit/i}));
+
+            expect(screen.getByText('Použití SI čipu')).toBeInTheDocument();
+            expect(screen.getByText('Půjčení čipu povoleno')).toBeInTheDocument();
+            expect(screen.getByRole('checkbox')).toBeChecked();
+        });
+    });
+
+    describe('shared services — count summary section (6.4)', () => {
+        it('renders both summary lines when sharedServicesSummary has both sub-objects', () => {
+            renderPage(createMockPageData(mockEventDetailData({
+                sharedServicesSummary: {
+                    sharedTransport: {count: 12},
+                    sharedAccommodation: {count: 8},
+                },
+            })));
+            expect(screen.getByText('Společná doprava: 12 členů')).toBeInTheDocument();
+            expect(screen.getByText('Společné ubytování: 8 členů')).toBeInTheDocument();
+        });
+
+        it('renders only the transport line when only sharedTransport is present', () => {
+            renderPage(createMockPageData(mockEventDetailData({
+                sharedServicesSummary: {sharedTransport: {count: 3}},
+            })));
+            expect(screen.getByText('Společná doprava: 3 členové')).toBeInTheDocument();
+            expect(screen.queryByText(/Společné ubytování/)).not.toBeInTheDocument();
+        });
+
+        it('shows 0 členů when a sub-object is present with count 0', () => {
+            renderPage(createMockPageData(mockEventDetailData({
+                sharedServicesSummary: {sharedAccommodation: {count: 0}},
+            })));
+            expect(screen.getByText('Společné ubytování: 0 členů')).toBeInTheDocument();
+        });
+
+        it('uses correct Czech plural for count 1 and 2', () => {
+            renderPage(createMockPageData(mockEventDetailData({
+                sharedServicesSummary: {
+                    sharedTransport: {count: 1},
+                    sharedAccommodation: {count: 2},
+                },
+            })));
+            expect(screen.getByText('Společná doprava: 1 člen')).toBeInTheDocument();
+            expect(screen.getByText('Společné ubytování: 2 členové')).toBeInTheDocument();
+        });
+
+        it('renders no summary section when sharedServicesSummary is absent', () => {
+            renderPage(createMockPageData(mockEventDetailData()));
+            expect(screen.queryByText(/Společná doprava:/)).not.toBeInTheDocument();
+            expect(screen.queryByText(/Společné ubytování:/)).not.toBeInTheDocument();
         });
     });
 
@@ -1025,40 +1341,67 @@ describe('EventDetailPage', () => {
         });
     });
 
-    describe('cancellation section (6.3)', () => {
-        it('shows cancellation block for CANCELLED event', () => {
-            renderPage(createMockPageData(mockEventDetailData({status: 'CANCELLED'})));
-            expect(screen.getByText('AKCE BYLA ZRUŠENA')).toBeInTheDocument();
-        });
-
-        it('does not show cancellation block for non-CANCELLED event', () => {
+    describe('cancelled event marking in the header (D6)', () => {
+        it('leaves a non-cancelled event unmarked', () => {
             renderPage(createMockPageData(mockEventDetailData({status: 'ACTIVE'})));
-            expect(screen.queryByText('AKCE BYLA ZRUŠENA')).not.toBeInTheDocument();
+
+            expect(screen.getByRole('heading', {level: 1, name: 'Jarní závod 2025'})).not.toHaveClass('line-through');
         });
 
-        it('shows cancellation reason when provided', () => {
+        it('strikes through the name and keeps the prominent Zrušeno badge', () => {
             renderPage(createMockPageData(mockEventDetailData({
                 status: 'CANCELLED',
                 cancellationReason: 'Zrušeno kvůli počasí',
             })));
-            expect(screen.getByText('Zrušeno kvůli počasí')).toBeInTheDocument();
+
+            expect(screen.getByRole('heading', {level: 1, name: 'Jarní závod 2025'})).toHaveClass('line-through');
+            expect(screen.getByText('Zrušeno')).toBeInTheDocument();
         });
 
-        it('does not show reason text when cancellationReason is absent', () => {
+        it('renders the cancellation reason under the name, inside the header block', () => {
+            renderPage(createMockPageData(mockEventDetailData({
+                status: 'CANCELLED',
+                cancellationReason: 'Zrušeno kvůli počasí',
+            })));
+
+            const heading = screen.getByRole('heading', {level: 1, name: 'Jarní závod 2025'});
+            const reason = screen.getByText('Zrušeno kvůli počasí');
+            // The reason must be a sibling of the row carrying the name, which is what
+            // "directly under the name" means structurally. A bottom banner would put a
+            // Card in between and fail this without depending on any particular divider.
+            expect(reason.previousElementSibling).toContainElement(heading);
+        });
+
+        it('shows the struck name and the badge but no reason text when no reason was given', () => {
             renderPage(createMockPageData(mockEventDetailData({
                 status: 'CANCELLED',
                 cancellationReason: undefined,
             })));
-            expect(screen.getByText('AKCE BYLA ZRUŠENA')).toBeInTheDocument();
+
+            expect(screen.getByRole('heading', {level: 1, name: 'Jarní závod 2025'})).toHaveClass('line-through');
+            expect(screen.getByText('Zrušeno')).toBeInTheDocument();
+        });
+
+        it('drops the bottom cancellation banner and shows the reason exactly once', () => {
+            const {container} = renderPage(createMockPageData(mockEventDetailData({
+                status: 'CANCELLED',
+                cancellationReason: 'Zrušeno kvůli počasí',
+            })));
+
+            expect(screen.getAllByText('Zrušeno kvůli počasí')).toHaveLength(1);
+            // The banner was the only error-bordered Card on the page; asserting the class
+            // is gone holds even though the label it carried was deleted with it.
+            expect(container.querySelector('.border-error')).not.toBeInTheDocument();
         });
     });
 
     describe('registerForEvent — stay on page after registration (Group 8)', () => {
-        it('clicking registerForEvent opens modal but does NOT navigate away', () => {
+        it('clicking registerForEvent opens modal but does NOT navigate away', async () => {
             const data = mockEventDetailData({
                 _links: {
                     self: {href: 'http://localhost:8443/api/events/1'},
                     registrations: {href: 'http://localhost:8443/api/events/1/registrations'},
+                    newRegistration: {href: 'http://localhost:8443/api/events/1/registrations/M001?newRegistration=true'},
                 },
                 _templates: {
                     registerForEvent: mockHalFormsTemplate({method: 'POST', title: 'Přihlásit se'}),
@@ -1072,6 +1415,7 @@ describe('EventDetailPage', () => {
             expect(mockNavigate).not.toHaveBeenCalled();
             expect(screen.getByRole('heading', {level: 1, name: 'Jarní závod 2025'})).toBeInTheDocument();
             expect(screen.getByRole('heading', {name: /přihlášky/i})).toBeInTheDocument();
+            expect(await screen.findByLabelText(/SI čip/)).toHaveValue('1234567');
         });
     });
 
@@ -1199,6 +1543,30 @@ describe('EventDetailPage', () => {
             })));
             expect(screen.getByText('H21')).toBeInTheDocument();
             expect(screen.queryByText('200 CZK')).not.toBeInTheDocument();
+        });
+    });
+
+    describe('sync status indicator (I2 task 2.2)', () => {
+        it('renders SyncStatusIndicator when event._links.sync is present', () => {
+            const data = mockEventDetailData({
+                _links: {
+                    self: {href: 'http://localhost:8443/api/events/1'},
+                    sync: {href: 'http://localhost:8443/api/events/1/sync'},
+                },
+            });
+            renderPage(createMockPageData(data));
+
+            // Behavioural coverage of SyncStatusIndicator lives in SyncStatusIndicator.test.tsx;
+            // here we only assert the indicator is mounted when the sync link is present.
+            expect(screen.getByTestId('sync-error')).toBeInTheDocument();
+        });
+
+        it('does not render SyncStatusIndicator when event._links.sync is absent', () => {
+            renderPage(createMockPageData(mockEventDetailData()));
+
+            expect(screen.queryByTestId('sync-error')).not.toBeInTheDocument();
+            expect(screen.queryByTestId('sync-loading')).not.toBeInTheDocument();
+            expect(screen.queryByTestId(/^sync-status-/)).not.toBeInTheDocument();
         });
     });
 });

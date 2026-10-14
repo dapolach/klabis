@@ -3,49 +3,40 @@ package com.klabis.groups.freegroup.infrastructure.restapi;
 import com.klabis.common.exceptions.InsufficientAuthorityException;
 import com.klabis.common.mvc.MvcComponent;
 import com.klabis.common.security.KlabisJwtAuthenticationToken;
+import com.klabis.common.users.Authority;
+import com.klabis.common.ui.HalFormsOptionsDef;
 import com.klabis.common.ui.HalResponseContext;
 import com.klabis.common.ui.ModelWithDomainPostprocessor;
 import com.klabis.common.ui.RootModel;
-import com.klabis.groups.common.domain.GroupMembership;
-import com.klabis.groups.freegroup.domain.Invitation;
-import com.klabis.groups.freegroup.domain.InvitationId;
 import com.klabis.groups.freegroup.FreeGroupId;
 import com.klabis.groups.freegroup.application.FreeGroupManagementPort;
 import com.klabis.groups.freegroup.domain.FreeGroup;
-import com.klabis.groups.infrastructure.restapi.AddOwnerRequest;
-import com.klabis.groups.infrastructure.restapi.CancelInvitationRequest;
-import com.klabis.groups.infrastructure.restapi.CreateGroupRequest;
-import com.klabis.groups.infrastructure.restapi.FreeGroupMembershipResponse;
-import com.klabis.groups.infrastructure.restapi.FreeGroupMembershipResponseBuilder;
-import com.klabis.groups.infrastructure.restapi.GroupResponse;
-import com.klabis.groups.infrastructure.restapi.GroupResponseBuilder;
-import com.klabis.groups.infrastructure.restapi.GroupsApi;
-import com.klabis.groups.infrastructure.restapi.GroupSummaryResponse;
-import com.klabis.groups.infrastructure.restapi.GroupSummaryResponseBuilder;
-import com.klabis.groups.infrastructure.restapi.InviteMemberRequest;
-import com.klabis.groups.infrastructure.restapi.OwnerResponse;
-import com.klabis.groups.infrastructure.restapi.OwnerResponseBuilder;
-import com.klabis.groups.infrastructure.restapi.PendingInvitationResponse;
-import com.klabis.groups.infrastructure.restapi.RenameGroupRequest;
-import org.springframework.hateoas.server.ExposesResourceFor;
+import com.klabis.groups.freegroup.domain.Invitation;
+import com.klabis.groups.freegroup.domain.InvitationId;
+import com.klabis.groups.infrastructure.restapi.*;
 import com.klabis.members.ActingMember;
 import com.klabis.members.MemberId;
 import com.klabis.members.infrastructure.restapi.MembersApi;
 import org.jmolecules.architecture.hexagonal.PrimaryAdapter;
+import org.springframework.hateoas.Affordance;
 import org.springframework.hateoas.CollectionModel;
 import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.MediaTypes;
+import org.springframework.hateoas.server.ExposesResourceFor;
 import org.springframework.hateoas.server.RepresentationModelProcessor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Stream;
 
-import static com.klabis.common.ui.HalFormsSupport.klabisAfford;
-import static com.klabis.common.ui.HalFormsSupport.klabisLinkTo;
+import static com.klabis.common.ui.HalFormsSupport.*;
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.linkTo;
 import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.methodOn;
 
@@ -63,7 +54,8 @@ class FreeGroupController implements GroupsApi {
 
     @Override
     public ResponseEntity<Void> createGroup(CreateGroupRequest request, @ActingMember MemberId actingMember) {
-        FreeGroup group = membersGroupManagementService.createGroup(request.name(), actingMember);
+        FreeGroup group = membersGroupManagementService.createGroup(request.name(), actingMember,
+                DelegatedAuthorities.toDomain(request.delegatedAuthorities()));
 
         return ResponseEntity.created(
                 linkTo(methodOn(GroupsApi.class).getGroup(group.getId().uuid(), null)).toUri()
@@ -97,7 +89,9 @@ class FreeGroupController implements GroupsApi {
         }
 
         HalResponseContext.setDomain(group);
-        return ResponseEntity.ok(toGroupResponse(group, id, isOwner));
+        HalResponseContext.setDeferredContext(FreeGroupItemContext.class,
+                () -> new FreeGroupItemContext(group, isOwner));
+        return ResponseEntity.ok(toGroupResponse(group, isOwner));
     }
 
     @Override
@@ -177,75 +171,43 @@ class FreeGroupController implements GroupsApi {
         return ResponseEntity.noContent().build();
     }
 
-    private GroupResponse toGroupResponse(FreeGroup group, UUID groupUuid, boolean requestingUserIsOwner) {
-        Set<MemberId> ownerIds = group.getOwners();
-
-        List<EntityModel<OwnerResponse>> ownerModels = ownerIds.stream()
-                .map(ownerId -> buildOwnerModel(ownerId, groupUuid, requestingUserIsOwner, ownerIds.size()))
+    private GroupResponse toGroupResponse(FreeGroup group, boolean requestingUserIsOwner) {
+        List<EntityModel<OwnerResponse>> ownerModels = group.getOwners().stream()
+                .map(ownerId -> EntityModel.of(OwnerResponseBuilder.builder().memberId(ownerId.uuid()).build()))
                 .toList();
 
         List<EntityModel<FreeGroupMembershipResponse>> memberModels = group.getMembers().stream()
-                .map(m -> buildMemberModel(m, groupUuid, requestingUserIsOwner, ownerIds))
+                .map(m -> EntityModel.of(FreeGroupMembershipResponseBuilder.builder()
+                        .memberId(m.memberId().uuid())
+                        .joinedAt(m.joinedAt())
+                        .build()))
                 .toList();
 
         List<EntityModel<PendingInvitationResponse>> pendingInvitationModels = List.of();
         if (requestingUserIsOwner) {
             pendingInvitationModels = group.getPendingInvitations().stream()
-                    .map(inv -> buildPendingInvitationModel(group, inv))
+                    .map(inv -> EntityModel.of(toPendingInvitationResponse(group, inv)))
                     .toList();
         }
 
         return GroupResponseBuilder.builder()
                 .id(group.getId().uuid())
                 .name(group.getName())
+                .delegatedAuthorities(DelegatedAuthorities.toWire(group.delegatedAuthorities()))
                 .owners(ownerModels)
                 .members(memberModels)
                 .pendingInvitations(pendingInvitationModels)
                 .build();
     }
 
-    private EntityModel<OwnerResponse> buildOwnerModel(MemberId ownerId, UUID groupUuid, boolean requestingUserIsOwner, int ownerCount) {
-        EntityModel<OwnerResponse> model = EntityModel.of(OwnerResponseBuilder.builder().memberId(ownerId.uuid()).build());
-        klabisLinkTo(methodOn(MembersApi.class).getMember(ownerId.uuid(), null))
-                .map(link -> link.withRel("member"))
-                .ifPresent(model::add);
-        if (requestingUserIsOwner && ownerCount > 1) {
-            klabisLinkTo(methodOn(GroupsApi.class).removeGroupOwner(groupUuid, ownerId.uuid(), null))
-                    .ifPresent(link -> model.add(link.withSelfRel()
-                            .andAffordances(klabisAfford(methodOn(GroupsApi.class)
-                                    .removeGroupOwner(groupUuid, ownerId.uuid(), null)))));
-        }
-        return model;
-    }
-
-    private EntityModel<FreeGroupMembershipResponse> buildMemberModel(
-            GroupMembership membership, UUID groupUuid, boolean isOwner, Set<MemberId> ownerIds) {
-
-        MemberId memberId = membership.memberId();
-        FreeGroupMembershipResponse response = FreeGroupMembershipResponseBuilder.builder()
-                .memberId(memberId.uuid())
-                .joinedAt(membership.joinedAt())
+    private PendingInvitationResponse toPendingInvitationResponse(FreeGroup group, Invitation invitation) {
+        return PendingInvitationResponseBuilder.builder()
+                .groupId(group.getId().uuid())
+                .groupName(group.getName())
+                .invitationId(invitation.getId().value())
+                .invitedBy(invitation.getInvitedBy().uuid())
+                .delegatedAuthorities(DelegatedAuthorities.toWire(group.delegatedAuthorities()))
                 .build();
-
-        EntityModel<FreeGroupMembershipResponse> model = EntityModel.of(response);
-        klabisLinkTo(methodOn(MembersApi.class).getMember(memberId.uuid(), null))
-                .map(link -> link.withRel("member"))
-                .ifPresent(model::add);
-
-        boolean memberIsOwner = ownerIds.contains(memberId);
-        if (isOwner && !memberIsOwner) {
-            klabisLinkTo(methodOn(GroupsApi.class)
-                    .removeGroupMember(groupUuid, memberId.uuid(), null))
-                    .ifPresent(link -> model.add(link.withSelfRel()
-                            .andAffordances(klabisAfford(methodOn(GroupsApi.class)
-                                    .removeGroupMember(groupUuid, memberId.uuid(), null)))));
-        }
-
-        return model;
-    }
-
-    private EntityModel<PendingInvitationResponse> buildPendingInvitationModel(FreeGroup group, Invitation invitation) {
-        return InvitationModelBuilder.build(group, invitation);
     }
 
 }
@@ -256,31 +218,43 @@ class FreeGroupDetailsPostprocessor extends ModelWithDomainPostprocessor<GroupRe
     @Override
     public void process(EntityModel<GroupResponse> dtoModel, FreeGroup group) {
         UUID id = group.getId().uuid();
-        klabisLinkTo(methodOn(GroupsApi.class).getGroup(id, null)).ifPresent(link -> {
-            var selfLink = link.withSelfRel();
-            if (isActingMemberOwner(group)) {
-                selfLink = selfLink
-                        .andAffordances(klabisAfford(methodOn(GroupsApi.class).updateGroup(id, null, null)))
-                        .andAffordances(klabisAfford(methodOn(GroupsApi.class).deleteGroup(id, null)))
-                        .andAffordances(klabisAfford(methodOn(GroupsApi.class).addGroupOwner(id, null, null)))
-                        .andAffordances(klabisAfford(methodOn(GroupsApi.class).inviteMember(id, null, null)));
-            }
-            dtoModel.add(selfLink);
-        });
-
+        klabisLinkTo(methodOn(GroupsApi.class).getGroup(id, null)).ifPresent(link ->
+                dtoModel.add(link.withSelfRel().andAffordances(selfLinkAffordances(group))));
         klabisLinkTo(methodOn(GroupsApi.class).listGroups(null))
                 .ifPresent(link -> dtoModel.add(link.withRel("collection")));
     }
 
-    private boolean isActingMemberOwner(FreeGroup group) {
+    private List<Affordance> selfLinkAffordances(FreeGroup group) {
+        UUID id = group.getId().uuid();
+        Optional<MemberId> actingMember = actingMember();
+        if (actingMember.map(group::isOwner).orElse(false)) {
+            Map<String, HalFormsOptionsDef> memberIdOptions = Map.of("memberId",
+                    HalFormsOptionsDef.remote(methodOn(MembersApi.class).listMemberOptions()));
+            return Stream.<List<Affordance>>of(
+                    klabisAfford(methodOn(GroupsApi.class).updateGroup(id, null, null)),
+                    klabisAfford(methodOn(GroupsApi.class).deleteGroup(id, null)),
+                    klabisAffordWithOptions(methodOn(GroupsApi.class).addGroupOwner(id, null, null), memberIdOptions),
+                    klabisAffordWithOptions(methodOn(GroupsApi.class).inviteMember(id, null, null), memberIdOptions))
+                    .flatMap(List::stream)
+                    .toList();
+        }
+        // Owners give up ownership through removeGroupOwner, so the self link only offers "leave the group"
+        // to plain members. It reuses removeGroupMember with the caller's own id; the client renders it as
+        // "Opustit skupinu" and reads it off the self link, where it cannot collide with the per-row
+        // removeGroupMember affordance an owner sees on the member list.
+        return actingMember
+                .filter(group::hasMember)
+                .map(member -> klabisAfford(
+                        methodOn(GroupsApi.class).removeGroupMember(id, member.uuid(), null)))
+                .orElseGet(List::of);
+    }
+
+    private Optional<MemberId> actingMember() {
         var auth = SecurityContextHolder.getContext().getAuthentication();
         if (auth instanceof KlabisJwtAuthenticationToken token) {
-            return token.getMemberIdUuid()
-                    .map(MemberId::new)
-                    .map(group::isOwner)
-                    .orElse(false);
+            return token.getMemberIdUuid().map(MemberId::new);
         }
-        return false;
+        return Optional.empty();
     }
 }
 
@@ -289,6 +263,10 @@ class GroupsRootPostprocessor implements RepresentationModelProcessor<EntityMode
 
     @Override
     public EntityModel<RootModel> process(EntityModel<RootModel> model) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (!(auth instanceof KlabisJwtAuthenticationToken token) || !token.hasMemberProfile()) {
+            return model;
+        }
         klabisLinkTo(methodOn(GroupsApi.class).listGroups(null))
                 .ifPresent(link -> model.add(link.withRel("groups")));
         return model;
@@ -316,7 +294,10 @@ class GroupListPostprocessor
     public CollectionModel<EntityModel<GroupSummaryResponse>> process(
             CollectionModel<EntityModel<GroupSummaryResponse>> model) {
         model.mapLink(org.springframework.hateoas.IanaLinkRelations.SELF, selfLink -> (org.springframework.hateoas.Link) selfLink
-                .andAffordances(klabisAfford(methodOn(GroupsApi.class).createGroup(null, null))));
+                .andAffordances(klabisAffordWithOptions(methodOn(GroupsApi.class).createGroup(null, null),
+                        Map.of("delegatedAuthorities", HalFormsOptionsDef.values(FreeGroup.delegatableAuthorities().stream()
+                                .map(Authority::getValue)
+                                .toList())))));
         return model;
     }
 }

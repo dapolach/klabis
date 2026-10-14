@@ -1,4 +1,4 @@
-import {normalizeKlabisApiPath, shouldFetchTargetData} from './halFormsUtils';
+import {stripUriTemplate, normalizeKlabisApiPath, shouldFetchTargetData} from './halFormsUtils';
 
 describe('normalizeApiPath', () => {
     it('removes /api prefix from path', () => {
@@ -81,5 +81,20 @@ describe('shouldFetchTargetData', () => {
 
     it('handles query parameters - exact match including params should return false', () => {
         expect(shouldFetchTargetData('/members/123?view=edit', '/members/123?view=edit')).toBe(false);
+    });
+});
+
+describe('stripUriTemplate', () => {
+    it('drops the template expressions', () => {
+        expect(stripUriTemplate('https://localhost:8443/api/legal-guardian-options{?kind}'))
+            .toBe('https://localhost:8443/api/legal-guardian-options');
+    });
+
+    it('keeps fixed query parameters outside the template', () => {
+        expect(stripUriTemplate('/api/opts?kind=LEGAL_GUARDIAN{&q}')).toBe('/api/opts?kind=LEGAL_GUARDIAN');
+    });
+
+    it('leaves non-templated urls untouched', () => {
+        expect(stripUriTemplate('/api/x?a=1')).toBe('/api/x?a=1');
     });
 });

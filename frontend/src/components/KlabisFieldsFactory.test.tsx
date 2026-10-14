@@ -4,7 +4,6 @@ import {Form, Formik} from 'formik';
 import {vi} from 'vitest';
 import {createMemberFilteredFactory, klabisFieldsFactory} from './KlabisFieldsFactory';
 import type {HalFormsInputProps} from './HalNavigator2/halforms';
-import type {HalFormsOptionValue, HalFormsProperty, OptionItem} from '../api/types';
 
 vi.mock('../hooks/useEventTypes', () => ({
     useEventTypes: () => ({
@@ -31,13 +30,15 @@ vi.mock('./HalNavigator2/halforms/fields', async () => {
         HalFormsInput: ({prop}: HalFormsInputProps) => (
             <div data-testid={`hal-input-${prop.name}`}>{prop.prompt}</div>
         ),
-        HalFormsMemberId: ({prop, errorText}: HalFormsInputProps) => (
+        HalFormsMemberId: ({prop, errorText, excludeIds, includeIds}: HalFormsInputProps & {excludeIds?: string[]; includeIds?: string[]}) => (
             <div data-testid="hal-forms-memberid-mock">
                 <span data-testid="select-name">{prop.name}</span>
                 <span data-testid="select-prompt">{prop.prompt}</span>
                 {prop.options?.link?.href && (
                     <span data-testid="select-href">{prop.options.link.href}</span>
                 )}
+                {excludeIds && <span data-testid="select-excluded">{excludeIds.join(',')}</span>}
+                {includeIds && <span data-testid="select-included">{includeIds.join(',')}</span>}
                 {errorText && <span data-testid="select-error">{errorText}</span>}
             </div>
         ),
@@ -51,7 +52,20 @@ vi.mock('./HalNavigator2/halforms/fields', async () => {
             </div>
         ),
         HalFormsSelect: ({prop}: HalFormsInputProps) => (
-            <div data-testid={`hal-select-${prop.name}`}>{prop.prompt}</div>
+            <div data-testid={`hal-select-${prop.name}`}>
+                {prop.prompt}
+                {prop.options?.link?.href && (
+                    <span data-testid="select-href">{prop.options.link.href}</span>
+                )}
+            </div>
+        ),
+        HalFormsMultiSelect: ({prop}: HalFormsInputProps) => (
+            <div data-testid={`hal-multiselect-${prop.name}`}>
+                <span data-testid="multiselect-prompt">{prop.prompt}</span>
+                {prop.options?.link?.href && (
+                    <span data-testid="multiselect-href">{prop.options.link.href}</span>
+                )}
+            </div>
         ),
     };
 });
@@ -95,16 +109,19 @@ describe('KlabisFieldsFactory', () => {
             }
         });
 
-        it('should configure remote options pointing to /members/options endpoint', () => {
+        it('should pass through the backend-provided options.link untouched', () => {
             const mockConf = createMockConf({
-                prop: {name: 'memberId', prompt: 'Choose Member', type: 'MemberId'},
+                prop: {
+                    name: 'memberId', prompt: 'Choose Member', type: 'MemberId',
+                    options: {link: {href: 'http://localhost:8443/api/members/options'}},
+                },
             });
 
             const fieldElement = klabisFieldsFactory('MemberId', mockConf);
             render(fieldElement!);
 
             expect(screen.getByTestId('hal-forms-memberid-mock')).toBeInTheDocument();
-            expect(screen.getByTestId('select-href')).toHaveTextContent('/members/options');
+            expect(screen.getByTestId('select-href')).toHaveTextContent('http://localhost:8443/api/members/options');
         });
 
         it('should preserve the original prompt from prop', () => {
@@ -140,10 +157,109 @@ describe('KlabisFieldsFactory', () => {
 
             expect(screen.getByTestId('select-name')).toHaveTextContent('testMemberId');
         });
+
+        // D7: the base factory detects that a custom widget exists for "MemberId" (by probing
+        // with a single-value-shaped conf) and, for a multi property, renders one row per item
+        // through that same widget via HalFormsCollectionField — the member picker's options
+        // link is shared across all rows.
+        it('should render one HalFormsMemberId row per item for a multi MemberId field, via HalFormsCollectionField', () => {
+            const mockConf = createMockConf({
+                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'MemberId', multiple: true},
+            });
+
+            const fieldElement = klabisFieldsFactory('MemberId', mockConf);
+            render(
+                <Formik initialValues={{memberIds: ['m1', 'm2']}} onSubmit={vi.fn()}>
+                    <Form>{fieldElement}</Form>
+                </Formik>
+            );
+
+            expect(screen.getAllByTestId('hal-forms-memberid-mock')).toHaveLength(2);
+        });
+
+        it('should pass through the backend-provided options.link to each row of a multi MemberId field', () => {
+            const mockConf = createMockConf({
+                prop: {
+                    name: 'memberIds', prompt: 'Vyberte členy', type: 'MemberId', multiple: true,
+                    options: {link: {href: 'http://localhost:8443/api/members/options'}},
+                },
+            });
+
+            const fieldElement = klabisFieldsFactory('MemberId', mockConf);
+            render(
+                <Formik initialValues={{memberIds: ['m1', 'm2']}} onSubmit={vi.fn()}>
+                    <Form>{fieldElement}</Form>
+                </Formik>
+            );
+
+            const rows = screen.getAllByTestId('hal-forms-memberid-mock');
+            expect(rows).toHaveLength(2);
+            expect(screen.getAllByTestId('select-href')[0]).toHaveTextContent('http://localhost:8443/api/members/options');
+        });
+
+        it('should preserve the original prompt as the collection header for a multi MemberId field', () => {
+            const mockConf = createMockConf({
+                prop: {name: 'memberIds', prompt: 'Členové rodiny', type: 'MemberId', multiple: true},
+            });
+
+            const fieldElement = klabisFieldsFactory('MemberId', mockConf);
+            render(
+                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
+                    <Form>{fieldElement}</Form>
+                </Formik>
+            );
+
+            expect(screen.getByText('Členové rodiny')).toBeInTheDocument();
+        });
+    });
+
+    // A family group parent is a user of the system and need not be a club member, so the API
+    // types the add-parent / create-group field as "UserId" instead of "MemberId". The options
+    // still come from listMemberOptions (whose UUIDs are identical), so the member picker — not a
+    // plain select — is what the field needs.
+    describe('UserId field type', () => {
+
+        it('should render the member picker for a UserId field', () => {
+            const mockConf = createMockConf({
+                prop: {
+                    name: 'userId', prompt: 'Rodič', type: 'UserId',
+                    options: {link: {href: 'http://localhost:8443/api/members/options'}},
+                },
+            });
+
+            const fieldElement = klabisFieldsFactory('UserId', mockConf);
+            render(fieldElement!);
+
+            expect(screen.getByTestId('hal-forms-memberid-mock')).toBeInTheDocument();
+            expect(screen.getByTestId('select-href')).toHaveTextContent('http://localhost:8443/api/members/options');
+        });
+
+        it('should preserve the original field name and prompt', () => {
+            const mockConf = createMockConf({
+                prop: {name: 'userId', prompt: 'Rodič', type: 'UserId'},
+            });
+
+            const fieldElement = klabisFieldsFactory('UserId', mockConf);
+            render(fieldElement!);
+
+            expect(screen.getByTestId('select-name')).toHaveTextContent('userId');
+            expect(screen.getByTestId('select-prompt')).toHaveTextContent('Rodič');
+        });
+
+        it('should respect inline options instead of the member picker', () => {
+            const mockConf = createMockConf({
+                prop: {name: 'userId', prompt: 'Rodič', type: 'UserId', options: {inline: [{value: 'u1', prompt: 'Jana'}]}},
+            });
+
+            const fieldElement = klabisFieldsFactory('UserId', mockConf);
+            render(fieldElement!);
+
+            expect(screen.getByTestId('hal-select-userId')).toBeInTheDocument();
+            expect(screen.queryByTestId('hal-forms-memberid-mock')).not.toBeInTheDocument();
+        });
     });
 
     describe('AddressRequest field type', () => {
-
         it('should call subElementProps with "street" (not "streetAndNumber")', () => {
             const mockSubElementProps = createMockSubElementProps();
             const mockConf = createMockConf({
@@ -216,38 +332,6 @@ describe('KlabisFieldsFactory', () => {
         });
     });
 
-    describe('GuardianDTO field type', () => {
-
-        it('should render as single object with 5 sub-fields', () => {
-            const mockSubElementProps = createMockSubElementProps();
-            const mockConf = createMockConf({
-                prop: {name: 'guardian', prompt: 'Zákonný zástupce', type: 'GuardianDTO'},
-                subElementProps: mockSubElementProps,
-            });
-
-            const fieldElement = klabisFieldsFactory('GuardianDTO', mockConf);
-            render(fieldElement!);
-
-            expect(mockSubElementProps).toHaveBeenCalledWith('firstName', {prompt: 'Jméno'});
-            expect(mockSubElementProps).toHaveBeenCalledWith('lastName', {prompt: 'Příjmení'});
-            expect(mockSubElementProps).toHaveBeenCalledWith('relationship', {prompt: 'Vztah'});
-            expect(mockSubElementProps).toHaveBeenCalledWith('email', {prompt: 'E-mail', type: 'email'});
-            expect(mockSubElementProps).toHaveBeenCalledWith('phone', {prompt: 'Telefon', type: 'tel'});
-        });
-
-        it('should not render FieldArray or add/remove buttons', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'guardian', prompt: 'Zákonný zástupce', type: 'GuardianDTO'},
-            });
-
-            const fieldElement = klabisFieldsFactory('GuardianDTO', mockConf);
-            render(fieldElement!);
-
-            expect(screen.queryByText('Pridej')).not.toBeInTheDocument();
-            expect(screen.queryByText('Odeber')).not.toBeInTheDocument();
-        });
-    });
-
     describe('MedicalCourseDto field type', () => {
 
         it('should be registered and render sub-fields', () => {
@@ -286,161 +370,127 @@ describe('KlabisFieldsFactory', () => {
         });
     });
 
-    describe('DeactivationReason field type', () => {
+    // D7: "UUID" alone no longer implies a member picker (that regressed multi UUID fields with
+    // link options — coordinators, disciplineIds — into a single select). The member picker is
+    // used only for the explicit "MemberId" field type hint (see 'MemberId field type' above);
+    // a bare "UUID" field renders by its options/basic type instead.
+    describe('UUID field type (no member picker without the MemberId hint)', () => {
 
-        it('should render a select field for DeactivationReason type', () => {
+        it('should render nothing for a single UUID field with no options (no widget registered for bare UUID)', () => {
             const mockConf = createMockConf({
-                prop: {name: 'reason', prompt: 'Důvod ukončení', type: 'DeactivationReason'},
+                prop: {name: 'someId', prompt: 'Some Id', type: 'UUID'},
             });
 
-            const result = klabisFieldsFactory('DeactivationReason', mockConf);
-            expect(result).not.toBeNull();
+            const fieldElement = klabisFieldsFactory('UUID', mockConf);
 
-            render(result!);
-            expect(screen.getByTestId('hal-select-reason')).toBeInTheDocument();
+            expect(fieldElement).toBeNull();
         });
 
-        it('should include ODHLASKA option', () => {
+        it('should render the plain select (not the member picker) for a single UUID field with options.link', () => {
             const mockConf = createMockConf({
-                prop: {name: 'reason', prompt: 'Důvod', type: 'DeactivationReason'},
+                prop: {
+                    name: 'memberId', prompt: 'Vyberte člena', type: 'UUID',
+                    options: {link: {href: 'http://localhost:8443/api/members/options'}},
+                },
             });
 
-            const result = klabisFieldsFactory('DeactivationReason', mockConf);
-            render(result!);
+            const fieldElement = klabisFieldsFactory('UUID', mockConf);
+            render(fieldElement!);
 
-            const select = screen.getByTestId('hal-select-reason');
-            expect(select).toBeInTheDocument();
+            expect(screen.getByTestId('hal-select-memberId')).toBeInTheDocument();
+            expect(screen.getByTestId('select-href')).toHaveTextContent('http://localhost:8443/api/members/options');
+            expect(screen.queryByTestId('hal-forms-memberid-mock')).not.toBeInTheDocument();
         });
 
-        it('should pass inline options with all three DeactivationReason values', () => {
+        it('should render the plain select (not the member picker) when the backend sends inline options for a UUID field', () => {
             const mockConf = createMockConf({
-                prop: {name: 'reason', prompt: 'Důvod', type: 'DeactivationReason'},
+                prop: {
+                    name: 'level', prompt: 'Úroveň', type: 'UUID',
+                    options: {inline: [{value: 'a', prompt: 'A'}]},
+                },
             });
 
-            const result = klabisFieldsFactory('DeactivationReason', mockConf);
-            expect(result).not.toBeNull();
+            const fieldElement = klabisFieldsFactory('UUID', mockConf);
+            render(fieldElement!);
 
-            const capturedProp = (result as unknown as React.ReactElement<{prop: HalFormsProperty}>).props.prop;
+            expect(screen.getByTestId('hal-select-level')).toBeInTheDocument();
+            expect(screen.queryByTestId('hal-forms-memberid-mock')).not.toBeInTheDocument();
+        });
 
-            expect(capturedProp.options).toBeDefined();
-            expect(capturedProp.options!.inline).toBeDefined();
+        // Regression test: before the fix, a multi UUID field with backend-provided
+        // options.link fell through to the single-value member picker (HalFormsMemberId),
+        // submitting a scalar instead of an array — this is exactly the coordinators/
+        // disciplineIds bug. Now, since "UUID" has no registered custom widget, it falls to
+        // the generic multi-select — per row member pickers are reserved for the "MemberId"
+        // field type hint (see 'MemberId field type' describe block above).
+        it('should render the generic multi-select (not per-row member pickers) for a multi UUID field with options.link', () => {
+            const mockConf = createMockConf({
+                prop: {
+                    name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multiple: true,
+                    options: {link: {href: 'http://localhost:8443/api/members/options'}},
+                },
+            });
 
-            const values = (capturedProp.options!.inline as Array<OptionItem | HalFormsOptionValue>)
-                .map((o) => (typeof o === 'object' && 'value' in o) ? o.value : o);
-            expect(values).toContain('ODHLASKA');
-            expect(values).toContain('PRESTUP');
-            expect(values).toContain('OTHER');
+            const fieldElement = klabisFieldsFactory('UUID', mockConf);
+            render(
+                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
+                    <Form>{fieldElement}</Form>
+                </Formik>
+            );
+
+            expect(screen.getByTestId('multiselect-href')).toHaveTextContent('http://localhost:8443/api/members/options');
+            expect(screen.queryByTestId('hal-forms-memberid-mock')).not.toBeInTheDocument();
+            expect(screen.queryByTestId('collection-item')).not.toBeInTheDocument();
+        });
+
+        it('should render nothing per row for a multi UUID field without options (no widget registered for bare UUID)', () => {
+            const mockConf = createMockConf({
+                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multi: true},
+            });
+
+            const fieldElement = klabisFieldsFactory('UUID', mockConf);
+            render(
+                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
+                    <Form>{fieldElement}</Form>
+                </Formik>
+            );
+
+            // Falls back to HalFormsCollectionField (no custom widget, no options), but each
+            // row itself has nothing to render for bare "UUID" — no member-picker mock appears.
+            expect(screen.getAllByTestId('collection-item')).toHaveLength(1);
+            expect(screen.queryByTestId('hal-forms-memberid-mock')).not.toBeInTheDocument();
         });
     });
 
-    describe('UUID field type', () => {
+    describe('LegalGuardianInputRequest field type', () => {
 
-        it('should render HalFormsMemberId for single UUID field (memberId)', () => {
+        const optionsLink = {link: {href: 'http://localhost:8443/api/legal-guardian-options'}};
+
+        it('should delegate the multi property to HalFormsCollectionField', () => {
             const mockConf = createMockConf({
-                prop: {name: 'memberId', prompt: 'Vyberte člena', type: 'UUID'},
+                prop: {name: 'legalGuardians', prompt: 'Zástupci', type: 'LegalGuardianInputRequest', multiple: true, options: optionsLink},
             });
 
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(fieldElement!);
+            const result = klabisFieldsFactory('LegalGuardianInputRequest', mockConf);
 
-            expect(screen.getByTestId('hal-forms-memberid-mock')).toBeInTheDocument();
+            const element = result as React.ReactElement;
+            const componentName = (element.type as {displayName?: string; name?: string}).displayName
+                ?? (element.type as {displayName?: string; name?: string}).name;
+            expect(componentName).toMatch(/CollectionField/i);
         });
 
-        it('should configure remote options pointing to /members/options for single UUID field', () => {
+        it('should render each item as an existing-guardian picker using the collection options link', () => {
             const mockConf = createMockConf({
-                prop: {name: 'memberId', prompt: 'Vyberte člena', type: 'UUID'},
+                prop: {name: 'legalGuardians.0', prompt: 'Zástupci', type: 'LegalGuardianInputRequest', options: optionsLink},
             });
 
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(fieldElement!);
+            render(<Formik initialValues={{legalGuardians: [{}]}} onSubmit={vi.fn()}>
+                <Form>{klabisFieldsFactory('LegalGuardianInputRequest', mockConf)!}</Form>
+            </Formik>);
 
-            expect(screen.getByTestId('select-href')).toHaveTextContent('/members/options');
-        });
-
-        it('should render one HalFormsMemberId row per item for multi UUID field (multiple: true), via HalFormsCollectionField', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multiple: true},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(
-                <Formik initialValues={{memberIds: ['m1', 'm2']}} onSubmit={vi.fn()}>
-                    <Form>{fieldElement}</Form>
-                </Formik>
-            );
-
-            expect(screen.getAllByTestId('hal-forms-memberid-mock')).toHaveLength(2);
-        });
-
-        it('should configure remote options pointing to /members/options for each row of a multi UUID field', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multiple: true},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(
-                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
-                    <Form>{fieldElement}</Form>
-                </Formik>
-            );
-
-            expect(screen.getAllByTestId('select-href')[0]).toHaveTextContent('/members/options');
-        });
-
-        it('should preserve the original prompt for single UUID field', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberId', prompt: 'Správce skupiny', type: 'UUID'},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(fieldElement!);
-
-            expect(screen.getByTestId('select-prompt')).toHaveTextContent('Správce skupiny');
-        });
-
-        it('should preserve the original prompt as the collection header for multi UUID field', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberIds', prompt: 'Členové rodiny', type: 'UUID', multiple: true},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(
-                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
-                    <Form>{fieldElement}</Form>
-                </Formik>
-            );
-
-            expect(screen.getByText('Členové rodiny')).toBeInTheDocument();
-        });
-
-        it('should render one HalFormsMemberId row per item for UUID field with backend multi:true shorthand', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multi: true},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(
-                <Formik initialValues={{memberIds: ['m1', 'm2']}} onSubmit={vi.fn()}>
-                    <Form>{fieldElement}</Form>
-                </Formik>
-            );
-
-            expect(screen.getAllByTestId('hal-forms-memberid-mock')).toHaveLength(2);
-        });
-
-        it('should configure remote options for each row of a UUID field with backend multi:true shorthand', () => {
-            const mockConf = createMockConf({
-                prop: {name: 'memberIds', prompt: 'Vyberte členy', type: 'UUID', multi: true},
-            });
-
-            const fieldElement = klabisFieldsFactory('UUID', mockConf);
-            render(
-                <Formik initialValues={{memberIds: ['m1']}} onSubmit={vi.fn()}>
-                    <Form>{fieldElement}</Form>
-                </Formik>
-            );
-
-            expect(screen.getAllByTestId('select-href')[0]).toHaveTextContent('/members/options');
+            expect(screen.getByTestId('select-name')).toHaveTextContent('parent.userId');
+            expect(screen.getByTestId('select-href'))
+                .toHaveTextContent('http://localhost:8443/api/legal-guardian-options');
         });
     });
 
@@ -588,6 +638,7 @@ describe('KlabisFieldsFactory', () => {
             render(result!);
 
             expect(screen.getByTestId('hal-forms-memberid-mock')).toBeInTheDocument();
+            expect(screen.getByTestId('select-excluded')).toHaveTextContent('1');
         });
 
         it('applies excludeIds per row when the property is multi, via HalFormsCollectionField', () => {
@@ -604,6 +655,20 @@ describe('KlabisFieldsFactory', () => {
             );
 
             expect(screen.getAllByTestId('hal-forms-memberid-mock')).toHaveLength(2);
+        });
+
+        it('applies the filter to a UserId field as well, so already-in-group parents are hidden', () => {
+            const factory = createMemberFilteredFactory(['1']);
+            const mockConf = createMockConf({
+                prop: {name: 'userId', prompt: 'Rodič', type: 'UserId'},
+            });
+
+            const result = factory('UserId', mockConf);
+            expect(result).not.toBeNull();
+            render(result!);
+
+            expect(screen.getByTestId('hal-forms-memberid-mock')).toBeInTheDocument();
+            expect(screen.getByTestId('select-excluded')).toHaveTextContent('1');
         });
     });
 });

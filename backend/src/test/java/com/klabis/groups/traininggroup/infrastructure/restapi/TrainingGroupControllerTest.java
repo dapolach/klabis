@@ -1,13 +1,12 @@
 package com.klabis.groups.traininggroup.infrastructure.restapi;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
-import com.klabis.common.ui.HalFormsSupport;
+import com.klabis.common.groups.domain.CannotRemoveLastOwnerException;
+import com.klabis.common.groups.domain.DirectMemberAdditionNotAllowedException;
+import com.klabis.common.groups.domain.GroupMembership;
+import com.klabis.common.groups.domain.OwnerCannotBeMemberException;
 import com.klabis.common.users.Authority;
-import com.klabis.groups.common.domain.CannotRemoveLastOwnerException;
-import com.klabis.groups.common.domain.DirectMemberAdditionNotAllowedException;
-import com.klabis.groups.common.domain.GroupMembership;
+import com.klabis.groups.GroupsWebMvcTest;
 import com.klabis.groups.traininggroup.TrainingGroupId;
 import com.klabis.groups.traininggroup.application.MemberAlreadyInTrainingGroupException;
 import com.klabis.groups.traininggroup.application.TrainingGroupManagementPort;
@@ -18,10 +17,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.hateoas.MediaTypes;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
@@ -35,9 +31,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @DisplayName("TrainingGroupController API tests")
-@WebMvcTest(controllers = {TrainingGroupController.class})
-@Import({EncryptionConfiguration.class, HalFormsSupport.class})
-@WithPostprocessors
+@GroupsWebMvcTest
 class TrainingGroupControllerTest {
 
     private static final String MEMBER_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -47,7 +41,7 @@ class TrainingGroupControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
-    @MockitoBean
+    @Autowired
     private TrainingGroupManagementPort trainingGroupManagementService;
 
     private TrainingGroup buildTrainingGroup(UUID groupUuid, String name, AgeRange ageRange, String trainerUuidStr) {
@@ -72,6 +66,9 @@ class TrainingGroupControllerTest {
         @DisplayName("should return 403 when user lacks GROUPS:TRAINING authority")
         @WithKlabisMockUser(memberId = MEMBER_ID)
         void shouldReturn403WhenMissingTrainingAuthority() throws Exception {
+            when(trainingGroupManagementService.createTrainingGroup(any(TrainingGroup.CreateTrainingGroup.class)))
+                    .thenReturn(buildTrainingGroup(GROUP_UUID, "Juniors", new AgeRange(10, 18), TRAINER_ID));
+
             mockMvc.perform(
                             post("/api/training-groups")
                                     .contentType("application/json")
@@ -141,6 +138,9 @@ class TrainingGroupControllerTest {
         @DisplayName("should return 403 when user lacks GROUPS:TRAINING authority")
         @WithKlabisMockUser(memberId = MEMBER_ID)
         void shouldReturn403WhenMissingTrainingAuthority() throws Exception {
+            when(trainingGroupManagementService.listTrainingGroups())
+                    .thenReturn(List.of(buildTrainingGroup(GROUP_UUID, "Juniors", new AgeRange(10, 18), TRAINER_ID)));
+
             mockMvc.perform(
                             get("/api/training-groups")
                                     .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
@@ -160,6 +160,39 @@ class TrainingGroupControllerTest {
                                     .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
                     )
                     .andExpect(status().isOk());
+        }
+
+        @Test
+        @DisplayName("createTrainingGroup template should expose trainerId property with an options.link pointing at the member options endpoint")
+        @WithKlabisMockUser(memberId = MEMBER_ID, authorities = {Authority.GROUPS_TRAINING})
+        void shouldExposeTrainerIdOptionsLinkOnCreateTemplate() throws Exception {
+            when(trainingGroupManagementService.listTrainingGroups()).thenReturn(List.of());
+
+            mockMvc.perform(
+                            get("/api/training-groups")
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                    )
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$._templates.createTrainingGroup.properties[?(@.name=='trainerId')].options.link.href")
+                            .value("http://localhost/api/members/options"))
+                    .andExpect(jsonPath("$._templates.createTrainingGroup.properties[?(@.name=='trainerId')].type")
+                            .value("MemberId"));
+        }
+
+        @Test
+        @DisplayName("createTrainingGroup template should offer no choice of delegated permissions")
+        @WithKlabisMockUser(memberId = MEMBER_ID, authorities = {Authority.GROUPS_TRAINING})
+        void shouldNotOfferDelegationOnCreateTemplate() throws Exception {
+            when(trainingGroupManagementService.listTrainingGroups()).thenReturn(List.of());
+
+            mockMvc.perform(
+                            get("/api/training-groups")
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                    )
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$._templates.createTrainingGroup.properties[?(@.name=='name')]").isNotEmpty())
+                    .andExpect(jsonPath("$._templates.createTrainingGroup.properties[?(@.name=='delegatedAuthorities')]")
+                            .isEmpty());
         }
 
         @Test
@@ -237,6 +270,50 @@ class TrainingGroupControllerTest {
                                     .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
                     )
                     .andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        @DisplayName("training group detail and its edit template should offer no delegated permissions")
+        @WithKlabisMockUser(memberId = MEMBER_ID, authorities = {Authority.MEMBERS_READ, Authority.GROUPS_TRAINING})
+        void shouldNotOfferDelegationOnDetailAndEditTemplate() throws Exception {
+            TrainingGroup group = buildTrainingGroup(GROUP_UUID, "Juniors", new AgeRange(10, 18), TRAINER_ID);
+            when(trainingGroupManagementService.getTrainingGroup(any(TrainingGroupId.class))).thenReturn(group);
+
+            mockMvc.perform(
+                            get("/api/training-groups/{id}", GROUP_UUID)
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                    )
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.delegatedAuthorities").doesNotExist())
+                    .andExpect(jsonPath("$._templates.updateTrainingGroup.properties[?(@.name=='name')]").isNotEmpty())
+                    .andExpect(jsonPath("$._templates.updateTrainingGroup.properties[?(@.name=='delegatedAuthorities')]")
+                            .isEmpty());
+        }
+
+        @Test
+        @DisplayName("updateTrainingGroup, addTrainingGroupMember and addTrainer templates should expose member fields with an options.link pointing at the member options endpoint")
+        @WithKlabisMockUser(memberId = MEMBER_ID, authorities = {Authority.MEMBERS_READ, Authority.GROUPS_TRAINING})
+        void shouldExposeMemberOptionsLinkOnTemplates() throws Exception {
+            TrainingGroup group = buildTrainingGroup(GROUP_UUID, "Juniors", new AgeRange(10, 18), TRAINER_ID);
+            when(trainingGroupManagementService.getTrainingGroup(any(TrainingGroupId.class))).thenReturn(group);
+
+            mockMvc.perform(
+                            get("/api/training-groups/{id}", GROUP_UUID)
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                    )
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$._templates.updateTrainingGroup.properties[?(@.name=='trainers')].options.link.href")
+                            .value("http://localhost/api/members/options"))
+                    .andExpect(jsonPath("$._templates.updateTrainingGroup.properties[?(@.name=='trainers')].type")
+                            .value("MemberId"))
+                    .andExpect(jsonPath("$._templates.addTrainingGroupMember.properties[?(@.name=='memberId')].options.link.href")
+                            .value("http://localhost/api/members/options"))
+                    .andExpect(jsonPath("$._templates.addTrainingGroupMember.properties[?(@.name=='memberId')].type")
+                            .value("MemberId"))
+                    .andExpect(jsonPath("$._templates.addTrainer.properties[?(@.name=='memberId')].options.link.href")
+                            .value("http://localhost/api/members/options"))
+                    .andExpect(jsonPath("$._templates.addTrainer.properties[?(@.name=='memberId')].type")
+                            .value("MemberId"));
         }
     }
 
@@ -425,6 +502,10 @@ class TrainingGroupControllerTest {
         @DisplayName("should return 403 when user lacks GROUPS:TRAINING authority")
         @WithKlabisMockUser(memberId = MEMBER_ID)
         void shouldReturn403WhenMissingTrainingAuthority() throws Exception {
+            stubPrefill();
+            when(trainingGroupManagementService.updateTrainingGroup(any(TrainingGroupId.class), any()))
+                    .thenReturn(stubGroup());
+
             mockMvc.perform(
                             patch("/api/training-groups/{id}", GROUP_UUID)
                                     .contentType("application/json")
@@ -477,6 +558,26 @@ class TrainingGroupControllerTest {
                                             """.formatted(MEMBER_ID))
                     )
                     .andExpect(status().isConflict());
+        }
+
+        @Test
+        @DisplayName("should return 422 when the member is a trainer of this group")
+        @WithKlabisMockUser(memberId = MEMBER_ID, authorities = {Authority.GROUPS_TRAINING})
+        void shouldReturn422WhenMemberIsTrainerOfThisGroup() throws Exception {
+            MemberId trainer = new MemberId(UUID.fromString(MEMBER_ID));
+            doThrow(new OwnerCannotBeMemberException(trainer))
+                    .when(trainingGroupManagementService).addMemberToTrainingGroup(any(TrainingGroupId.class), any(MemberId.class));
+
+            mockMvc.perform(
+                            post("/api/training-groups/{id}/members", GROUP_UUID)
+                                    .contentType("application/json")
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE)
+                                    .content("""
+                                            {"memberId": "%s"}
+                                            """.formatted(MEMBER_ID))
+                    )
+                    .andExpect(status().is(422))
+                    .andExpect(jsonPath("$.title").value("Owner Cannot Be Member"));
         }
     }
 

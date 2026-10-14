@@ -72,23 +72,24 @@ class HalFormsMultiPropertyModule extends SimpleModule {
             String propertyName = getHalFormsPropertyName(bean);
 
             if (propertyName != null) {
-                List<HalFormsInlineOption> promptedOptions = HalFormsSupport.getPromptedInlineOptionsForProperty(propertyName);
-                if (promptedOptions != null && !promptedOptions.isEmpty()) {
-                    HalFormsOptions options = HalFormsOptions.inline(promptedOptions)
-                            .withValueField("value")
-                            .withPromptField("prompt");
+                HalFormsOptionsDef optionsDef = HalFormsSupport.getOptionsDefForProperty(propertyName);
+                HalFormsOptions options = switch (optionsDef) {
+                    case HalFormsOptionsDef.Values values when !values.values().isEmpty() ->
+                            HalFormsOptions.inline(values.values().toArray());
+                    case HalFormsOptionsDef.Inline inline when !inline.values().isEmpty() ->
+                            HalFormsOptions.inline(inline.values()).withValueField("value").withPromptField("prompt");
+                    case HalFormsOptionsDef.Remote remote -> HalFormsOptions.remote(remote.link());
+                    case null, default -> null;
+                };
+
+                if (options != null) {
                     gen.writeName("options");
                     prov.findValueSerializer(options.getClass()).serialize(options, gen, prov);
                     return;
                 }
 
-                List<String> inlineOptions = HalFormsSupport.getInlineOptionsForProperty(propertyName);
-                if (inlineOptions != null && !inlineOptions.isEmpty()) {
-                    HalFormsOptions options = HalFormsOptions.inline(inlineOptions.toArray());
-                    gen.writeName("options");
-                    prov.findValueSerializer(options.getClass()).serialize(options, gen, prov);
-                    return;
-                }
+                // No explicit (request-scoped) options: fall through to the bean's own "options"
+                // field, already populated for auto-detected enums by EnumOptionsAutoConfiguration.
             }
 
             super.serializeAsProperty(bean, gen, prov);

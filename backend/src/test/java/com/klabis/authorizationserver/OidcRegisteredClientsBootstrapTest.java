@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.DefaultApplicationArguments;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
@@ -18,6 +19,7 @@ import org.springframework.test.context.TestPropertySource;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest
+@AutoConfigureMockMvc
 @Import(TestApplicationConfiguration.class)
 @ActiveProfiles({"test", "test-bootstrap"})
 @TestPropertySource(properties = {
@@ -61,5 +63,16 @@ class OidcRegisteredClientsBootstrapTest {
         assertThat(localClient)
                 .as("klabis-web-local must not be registered when local-dev profile is inactive")
                 .isNull();
+    }
+
+    @Test
+    @DisplayName("should register klabis-web with SYNC scope allowed (sync endpoints must be reachable from the SPA)")
+    void shouldRegisterKlabisWebWithSyncScope() {
+        RegisteredClient client = registeredClientRepository.findByClientId(CLIENT_ID);
+
+        assertThat(client).as("OAuth2 client '%s' should be registered", CLIENT_ID).isNotNull();
+        assertThat(client.getScopes())
+                .as("klabis-web client must allow the SYNC scope so the SPA can call /api/.../sync endpoints")
+                .contains("SYNC");
     }
 }

@@ -9,8 +9,8 @@ Testing patterns derived from the `members` module as the canonical reference.
 | Domain and Value object unit | `@ExtendWith(MockitoExtension.class)` | No Spring | Business rules, invariants, state transitions |
 | Service unit | `@ExtendWith(MockitoExtension.class)` | No Spring | Service logic, mock interactions |
 | Repository | `@DataJdbcTest` | JDBC slice | CRUD, custom queries |
-| Controller | `@WebMvcTest` | MVC slice | HTTP status, request mapping, service calls |
-| Integration | `@ApplicationModuleTest` | Module + direct deps | Full flow with real database |
+| Controller (REST adapter) | `@<Module>WebMvcTest` (`@WebMvcTest` + `@ModuleSlicing`) | One shared MVC slice per module | HTTP status, request mapping, service calls, security (401/403), HAL links/affordances incl. postprocessors |
+| Integration | `@KlabisModuleTest` | Module + direct deps | Full flow with real database |
 | E2E | `@E2ETest` | All dependencies | Complete user scenarios |
 
 ## Domain & Service Unit Tests
@@ -87,47 +87,64 @@ Notes:
 
 ## Controller Tests (@WebMvcTest)
 
-**Critical**: `ResourceServerSecurityConfiguration` depends on `UserService` (via `AccountStatusValidationFilter`) — always mock it:
+The REST adapter is tested by **one primary test per controller: a `@WebMvcTest`** sharing a **single Spring context per module**. Everything that concerns the controller's HTTP contract lives there — request mapping, status codes, security (401/403 via the real filter chain with `@WithKlabisMockUser`), and links/affordances rendered by postprocessors (assert them on the controller's response in a `@Nested` class; no separate postprocessor/link-processor unit tests, no `@KlabisModuleTest` security tests). Full-stack scenarios stay in `@E2ETest` classes in the module root package (e.g. `com.klabis.members.MemberLifecycleE2ETest`), not in `restapi`.
+
+Reference implementation: `com.klabis.members.MembersWebMvcTest` (members module). This module-sliced form is the only form for REST adapter tests. The sole exception are the `common` infrastructure tests with their own test controller (`@WebMvcTest(controllers = ...)` + `CommonInfrastructureWebMvcSetup`), which deliberately keep their own contexts.
+
+### Per-module meta-annotation
 
 ```java
-@WebMvcTest(controllers = {MemberController.class, RegistrationController.class})
-@Import({MemberMapperImpl.class})
-@MockitoBean(types = {UserService.class, UserDetailsService.class})  // REQUIRED
+@WebMvcTest                                   // no `controllers` filter — all module controllers share one context
+@ModuleSlicing(module = "members", extraIncludes = {"groups", "calendar", "sync"},
+        mode = ApplicationModuleTest.BootstrapMode.STANDALONE, verifyAutomatically = false)
+@ActiveProfiles("test")
+@Import({ClockConfiguration.class, EncryptionConfiguration.class, HalFormsSupport.class})
+@MembersWebMvcMockitoBeans
+@CommonWebMvcMockitoBeans
+@GroupsWebMvcMockitoBeans
+@CalendarWebMvcMockitoBeans
+@SyncWebMvcMockitoBeans
+public @interface MembersWebMvcTest {}
+```
+
+- `@ModuleSlicing` (Spring Modulith) loads the real beans of the module (controllers, postprocessors, converters) plus shared `common`; use `mode = STANDALONE`. The meta-annotation must live in `com.klabis.<module>` and name `module` explicitly.
+- `extraIncludes` — only modules whose postprocessors add links/affordances to the responses the tests actually assert (members: `groups` → `trainingGroup` link, `calendar` → `ical-token` link, `sync` → sync link/state). A module whose port is injected into other modules' controllers (e.g. `sync`'s `SynchronizationPort`) is provided by adding the module to `extraIncludes` and composing its `*WebMvcMockitoBeans` — never by mocking the port directly in the consumer's annotation. Every included module loads **all** its web beans, so each needs its `*WebMvcMockitoBeans`. `@KlabisModuleTest` of a module whose controllers need a foreign primary port (e.g. members' `MemberController` -> `SynchronizationPort`) likewise needs `extraIncludes = "sync"`.
+- **Mock only primary ports.** The only beans a REST adapter test mocks are the module's primary ports (`@PrimaryPort`) and the same from other modules, plus infrastructure forced by the framework (`UserDetailsService`). Never mock:
+  - beans from the REST adapter package under test (renderers, converters, link-support implementations, mappers) — load the real ones;
+  - application/domain internals (repositories, `@Port` secondary ports, domain readers). A controller or postprocessor that needs one is bypassing the primary port — extend the primary port instead of mocking the repository.
+  An external client (e.g. `OrisApiClient`) is a justified exception only when the adapter calls it directly.
+- `<Module>WebMvcMockitoBeans` (test source of the owning module, e.g. `com.klabis.groups.GroupsWebMvcMockitoBeans`) bundles `@MockitoBean(types=...)` for all ports/repositories the module's web beans need. Consumers compose it without knowing the ports. Each type is mocked in exactly one such annotation — the module that defines it (`common` owns `UserService`, `UserDetailsService`, `PasswordChangePort`, `PermissionService`, `OrisClubKeyPort`). When a web bean of the module gains a dependency, add it there, not in a test.
+- Optional / feature-flag / profile-gated beans (injected as `Optional<T>`, e.g. `MemberDiscoveryPort`, `OrisEventImportPort`) never go into a `*WebMvcMockitoBeans` or the `@<Module>WebMvcTest`. The test that needs the feature declares the mock itself (`@MockitoBean` on a dedicated test class, e.g. `MemberOrisImportEnabledApiTest`); the shared-context test class keeps a `...DisabledTests` nested class verifying the "feature off" behaviour (endpoint 404, affordance absent). A required dependency must not be `Optional<T>` just for test convenience.
+
+```java
+@MembersWebMvcTest
 class MemberControllerApiTest {
 
-    @MockitoBean ManagementService managementService;
-    @MockitoBean MemberRepository memberRepository;
-
-    @TestBean EntityLinks entityLinks;  // Use HateoasTestingSupport
-
-    static EntityLinks entityLinks() {
-        return HateoasTestingSupport.createModuleEntityLinks(MemberController.class);
-    }
-
+    @Autowired ManagementPort managementService;      // mocks are injected with @Autowired, never @MockitoBean
     @Autowired MockMvc mockMvc;
 
-    @Test
-    @WithKlabisMockUser(authorities = {Authority.MEMBERS_READ})
-    void shouldReturnMemberDetails() throws Exception {
-        UUID id = UUID.randomUUID();
-        when(memberRepository.findById(new MemberId(id)))
-            .thenReturn(Optional.of(MemberTestDataBuilder.aMemberWithId(id).build()));
-
-        mockMvc.perform(get("/api/members/{id}", id)
-                .accept(MediaTypes.HAL_FORMS_JSON_VALUE))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.firstName").value("Jan"))
-            .andExpect(jsonPath("$._links.self.href").exists());
-    }
+    @Nested class EndpointSecurityTests { ... }       // 401/403 + merged security tests
+    @Nested class LegalGuardianGroupLinksTests { ... } // postprocessor links asserted on the controller response
 }
 ```
 
-## Integration Tests (@ApplicationModuleTest)
+Slice-context rules:
+- **One context per module.** Tests declare no `@MockitoBean`, `@Import`, `@ActiveProfiles` or `@TestPropertySource` of their own — any difference creates a new context and loses the sharing. Stub mocks via `@Autowired` fields (`reset` is automatic). A genuinely different configuration (e.g. feature flag on via a locally mocked `Optional` bean) is a separate, deliberately named test class — keep their number minimal, each one is an extra context.
+- `Converter<S,T>` beans are always included by `WebMvcTypeExcludeFilter` — never `@Import` or mock a converter. The same visibility is why a `Converter` must have no module-specific constructor dependencies and no `uses = <PlainMapper>` (see `dto-mapping.md`).
+- `EntityLinks` comes from the real context; no `@TestBean EntityLinks`.
+- 403 tests run against the shared context: stub the primary ports via `@Autowired` mocks so a permitted request would succeed, then assert the real filter chain rejects it.
+- Duplicate `@MockitoBean` of the same type (including via two composed annotations) fails context bootstrap — keep type ownership in one `*WebMvcMockitoBeans`.
+
+## Integration Tests (@KlabisModuleTest)
+
+Never use `@ApplicationModuleTest` directly — use `@KlabisModuleTest` (`com.klabis`), which wraps it with
+`verifyAutomatically = false` and `@ActiveProfiles("test")` and exposes `mode`, `module` and
+`extraIncludes`. Automatic verification runs a full ArchUnit import per test class; the module structure
+is verified once by `ModuleStructureVerificationTest`.
 
 ```java
-@ApplicationModuleTest(mode = ApplicationModuleTest.BootstrapMode.ALL_DEPENDENCIES)
+@KlabisModuleTest(mode = ApplicationModuleTest.BootstrapMode.ALL_DEPENDENCIES)
 @AutoConfigureMockMvc
-@ActiveProfiles("test")
 @Import(TestApplicationConfiguration.class)
 @DisplayName("Member Registration Integration Tests")
 class MemberRegistrationIntegrationTest {
@@ -176,7 +193,7 @@ class MemberLifecycleE2ETest {
 }
 ```
 
-`@E2ETest` is a meta-annotation combining `@ApplicationModuleTest(ALL_DEPENDENCIES)`, `@AutoConfigureMockMvc`, `@ActiveProfiles("test")`, `@CleanupTestData`, and `@Import(TestApplicationConfiguration.class)`.
+`@E2ETest` is a meta-annotation combining `@KlabisModuleTest(mode = ALL_DEPENDENCIES)`, `@AutoConfigureMockMvc`, `@CleanupTestData`, and `@Import(TestApplicationConfiguration.class)`.
 
 E2E scope rules:
 - 1 test per aggregate root verifying its **full lifecycle** (register → update → suspend → resume)
@@ -194,7 +211,8 @@ public @interface WithKlabisMockUser {
     String userId() default "";      // Random UUID if blank
     String memberId() default "";    // Blank = user without member record
     String username() default "";    // Default "ZBM8001"
-    Authority[] authorities() default {};
+    Authority[] authorities() default {};      // grants over everything
+    TargetGrant[] targetGrants() default {};   // grants over specific targets
 }
 ```
 
@@ -207,37 +225,34 @@ void adminCanReadMembers() { }
 @Test
 @WithKlabisMockUser(memberId = "uuid", username = "ZBM0101")
 void memberCanUpdateOwnProfile() { }
+
+@Test
+@WithKlabisMockUser(targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE,
+        type = TargetType.MEMBER, ids = {"<member uuid>"}))
+void delegateCanActForThatMemberOnly() { }
 ```
+
+The annotation builds a `KlabisJwtAuthenticationToken` carrying a fixed `AuthorizationSnapshot`, so `@WebMvcTest`s never touch the permission tables. The `*WebMvcTest` meta-annotations import the shared `KlabisWebMvcSliceConfiguration` (clock, encryption, `HalFormsSupport`, `AuthorizationEvaluator`, `AuthorizationSnapshotProvider`) — a new slice imports that one class instead of listing the beans. Tokens built by hand in unit tests: `KlabisAuthenticationFactory.createAuthenticationToken(JwtParams, AuthorizationSnapshot)`. A `targetGrants` authority must be one with `GrantForm.SPECIFIC` in a real deployment — the test snapshot does not filter. See `authorization.md`.
 
 Never use `@WithMockUser` — it creates a generic principal incompatible with `KlabisJwtAuthenticationToken`.
 
-## Mapper Tests
+## Converter Tests
 
-Test Domain → ResponseDTO mappers as standalone unit tests (no Spring context):
+Test `Converter<S,T>` implementations with a plain Spring context importing only the generated impls — no MVC slice:
 
 ```java
-@DisplayName("MemberMapper Tests")
-class MemberMapperTest {
+@ExtendWith(SpringExtension.class)
+@Import({MemberDetailsConverterImpl.class})
+class MemberMappingTests {
 
-    private final MemberMapper mapper = Mappers.getMapper(MemberMapper.class);
-
-    @Test
-    void shouldMapActiveAdultMemberToDetailsResponse() {
-        Member member = MemberTestDataBuilder.aMember().withAllOptionalFields().build();
-        MemberDetailsResponse response = mapper.toDetailsResponse(member);
-
-        assertThat(response.firstName()).isEqualTo(member.getFirstName());
-        assertThat(response.email()).isEqualTo(member.getEmail().value());
-        assertThat(response.guardian()).isNull();
-    }
+    @Autowired MemberDetailsConverter detailsConverter;
 
     @Test
     void shouldMapMinorMemberWithGuardian() {
         Member member = MemberTestDataBuilder.aMember().withGuardian(...).build();
-        MemberDetailsResponse response = mapper.toDetailsResponse(member);
+        MemberDetailsResponse response = detailsConverter.convert(member);
 
         assertThat(response.guardian()).isNotNull();
-        assertThat(response.guardian().email()).isEqualTo(...);
     }
 }
 ```
@@ -321,9 +336,14 @@ Use `@CleanupTestData` on E2E tests — tests share a single H2 instance.
 
 | Problem | Solution |
 |---------|----------|
-| `@WebMvcTest` fails with `UnsatisfiedDependencyException` | Add `@MockitoBean(types = {UserService.class, UserDetailsService.class})` |
+| `@WebMvcTest` fails with `UnsatisfiedDependencyException` / `NoSuchBeanDefinition` | A web bean's dependency is missing in a `*WebMvcMockitoBeans` (also check `common` and `extraIncludes` modules) |
+| Asserting published domain events | `@RecordApplicationEvents` + `ApplicationEvents`, not a custom `@EventListener` bean (`@Import` on the class splits the context cache key) |
 | Domain events not fired in E2E test | Add `SyncTaskExecutor` `@TestConfiguration` |
 | `@DataJdbcTest` doesn't find custom repos | Add `includeFilters = @Filter(type = ANNOTATION, value = Repository.class)` |
 | Tests interfere with each other in H2 | Use `@CleanupTestData` or `@Sql(statements = "DELETE FROM ...")` |
-| `EntityLinks` not available in `@WebMvcTest` | Provide `@TestBean EntityLinks` via `HateoasTestingSupport.createModuleEntityLinks()` |
+| `EntityLinks` not available in a `common` infrastructure `@WebMvcTest(controllers=...)` | Provide `@TestBean EntityLinks` via `HateoasTestingSupport.createModuleEntityLinks()` (not needed with `@ModuleSlicing`) |
+| Duplicate-mock error on context bootstrap | Type already mocked by a `*WebMvcMockitoBeans` — use `@Autowired` |
+| Test needs a mock of a repository, secondary port or adapter-package bean | Design smell — expose the data via a primary port (and load adapter beans for real); see "Mock only primary ports" |
+| Another Spring context is created for a controller test | The test class adds its own `@MockitoBean`/`@Import`/profile — move it into the module's meta-annotation |
 | `@WithMockUser` causes ClassCastException | Replace with `@WithKlabisMockUser` |
+| Link authorization (`klabisLinkTo`/`klabisAfford`) depends on test order | The static `HalFormsSupport` instance is bound per test method by `HalFormsSupportInstanceTestExecutionListener` (`spring.factories`) and is `null` outside it (`@BeforeAll` code fails fast on `klabisAfford*`/`klabisLinkTo`); plain unit tests (no Spring extension) get one over the `SecurityContextHolder` authentication from the auto-detected `PlainHalFormsSupportExtension`; a class declaring `@TestExecutionListeners` must use `MERGE` |

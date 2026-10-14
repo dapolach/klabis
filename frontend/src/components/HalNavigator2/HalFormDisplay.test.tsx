@@ -409,6 +409,99 @@ describe('HalFormDisplay Component', () => {
             });
         });
 
+        it('should not double-prefix /api when pathname already contains /api (sync sub-resource fallback)', async () => {
+            const onClose = vi.fn();
+            const user = userEvent.setup();
+
+            // Template without target — resolution falls through to resourceUrl → pathname fallback.
+            // Reproduces the sync sub-resource scenario: pathname comes from HalRouteProvider
+            // which preserves /api in targetUrl.pathname, so a naive '/api' + pathname would
+            // produce /api/api/... The handled submit URL must not duplicate the prefix.
+            const template = mockHalFormsTemplate({
+                title: 'Synchronize',
+                method: 'POST',
+                properties: [],
+                target: undefined,
+            });
+            const pageData = createMockPageData({status: 'IN_SYNC'});
+            const Wrapper = createWrapper(pageData);
+
+            fetchSpy.mockResolvedValueOnce(createMockResponse({status: 'IN_SYNC'}));
+
+            render(
+                <Wrapper>
+                    <HalFormDisplay
+                        template={template}
+                        templateName="synchronizeNow"
+                        resourceData={{status: 'IN_SYNC'}}
+                        pathname="/api/EVENTS/abc/sync"
+                        resourceUrl="https://localhost:8443/api/EVENTS/abc/sync"
+                        onClose={onClose}
+                    />
+                </Wrapper>
+            );
+
+            await waitFor(() => {
+                expect(screen.getByTestId('hal-forms-display')).toBeInTheDocument();
+            });
+
+            const submitButton = await screen.findByRole('button', {name: /odeslat/i});
+            await user.click(submitButton);
+
+            await waitFor(() => {
+                expect(fetchSpy).toHaveBeenCalled();
+            });
+            const submitUrl = fetchSpy.mock.calls[0][0] as string;
+            expect(submitUrl).not.toMatch(/\/api\/api\//);
+            expect(submitUrl).toMatch(/EVENTS\/abc\/sync/);
+        });
+
+        it('should normalize /api prefix on pathname when resourceUrl is missing', async () => {
+            const onClose = vi.fn();
+            const user = userEvent.setup();
+
+            // Bare-submit fallback path: template.target empty, resourceUrl missing.
+            // HalFormsPageLayout forwards an effective pathname that already includes /api
+            // (because the sync sub-resource's self-link is what feeds HalRouteProvider).
+            // The handler must normalize it, otherwise duplicate /api/api/ breaks submit.
+            const template = mockHalFormsTemplate({
+                title: 'Synchronize',
+                method: 'POST',
+                properties: [],
+                target: undefined,
+            });
+            const pageData = createMockPageData({status: 'IN_SYNC'});
+            const Wrapper = createWrapper(pageData);
+
+            fetchSpy.mockResolvedValueOnce(createMockResponse({status: 'IN_SYNC'}));
+
+            render(
+                <Wrapper>
+                    <HalFormDisplay
+                        template={template}
+                        templateName="synchronizeNow"
+                        resourceData={{status: 'IN_SYNC'}}
+                        pathname="/api/EVENTS/abc/sync"
+                        onClose={onClose}
+                    />
+                </Wrapper>
+            );
+
+            await waitFor(() => {
+                expect(screen.getByTestId('hal-forms-display')).toBeInTheDocument();
+            });
+
+            const submitButton = await screen.findByRole('button', {name: /odeslat/i});
+            await user.click(submitButton);
+
+            await waitFor(() => {
+                expect(fetchSpy).toHaveBeenCalled();
+            });
+            const submitUrl = fetchSpy.mock.calls[0][0] as string;
+            expect(submitUrl).not.toMatch(/\/api\/api\//);
+            expect(submitUrl).toMatch(/EVENTS\/abc\/sync/);
+        });
+
         it('should not call invalidateAllCaches when submission fails', async () => {
             const onClose = vi.fn();
             const user = userEvent.setup();
@@ -521,12 +614,12 @@ describe('HalFormDisplay Component', () => {
         });
 
         describe('auto-navigation on POST+Location', () => {
-            // target '/api/family-groups' normalizes to '/family-groups' which equals pathname
+            // target '/api/legal-guardian-groups' normalizes to '/legal-guardian-groups' which equals pathname
             // — no OPTIONS/GET prefetch. resourceData carries the pre-fill value 'Existing'.
             const renderPostForm = (method: HalFormsTemplateMethod, pageData?: ReturnType<typeof createMockPageData>) => {
                 const template = mockHalFormsTemplate({
                     title: 'Create Group',
-                    target: '/api/family-groups',
+                    target: '/api/legal-guardian-groups',
                     method,
                     properties: [{name: 'name', prompt: 'Name', type: 'text', required: true}],
                 });
@@ -538,7 +631,7 @@ describe('HalFormDisplay Component', () => {
                             template={template}
                             templateName="create"
                             resourceData={{id: 1, name: 'Existing'}}
-                            pathname="/family-groups"
+                            pathname="/legal-guardian-groups"
                             onClose={vi.fn()}
                         />
                     </Wrapper>
@@ -551,7 +644,7 @@ describe('HalFormDisplay Component', () => {
                 const pageData = createMockPageData({id: 1});
                 renderPostForm('POST', pageData);
 
-                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/family-groups/xyz'));
+                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/legal-guardian-groups/xyz'));
 
                 await waitFor(() => expect(screen.queryByText(/Nač/)).not.toBeInTheDocument());
                 const nameInput = screen.getByDisplayValue('Existing') as HTMLInputElement;
@@ -560,7 +653,7 @@ describe('HalFormDisplay Component', () => {
                 await user.click(screen.getByRole('button', {name: /odeslat/i}));
 
                 await waitFor(() => {
-                    expect(mockNavigate).toHaveBeenCalledWith('/family-groups/xyz');
+                    expect(mockNavigate).toHaveBeenCalledWith('/legal-guardian-groups/xyz');
                 });
             });
 
@@ -569,7 +662,7 @@ describe('HalFormDisplay Component', () => {
                 const mockOnClose = vi.fn();
                 const template = mockHalFormsTemplate({
                     title: 'Create Group',
-                    target: '/api/family-groups',
+                    target: '/api/legal-guardian-groups',
                     method: 'POST',
                     properties: [{name: 'name', prompt: 'Name', type: 'text', required: true}],
                 });
@@ -581,13 +674,13 @@ describe('HalFormDisplay Component', () => {
                             template={template}
                             templateName="create"
                             resourceData={{id: 1, name: 'Existing'}}
-                            pathname="/family-groups"
+                            pathname="/legal-guardian-groups"
                             onClose={mockOnClose}
                         />
                     </Wrapper>
                 );
 
-                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/family-groups/xyz'));
+                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/legal-guardian-groups/xyz'));
 
                 await waitFor(() => expect(screen.queryByText(/Nač/)).not.toBeInTheDocument());
                 const nameInput = screen.getByDisplayValue('Existing') as HTMLInputElement;
@@ -595,7 +688,7 @@ describe('HalFormDisplay Component', () => {
                 await user.type(nameInput, 'My Group');
                 await user.click(screen.getByRole('button', {name: /odeslat/i}));
 
-                await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/family-groups/xyz'));
+                await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/legal-guardian-groups/xyz'));
                 expect(mockOnClose).not.toHaveBeenCalled();
             });
 
@@ -604,7 +697,7 @@ describe('HalFormDisplay Component', () => {
                 const mockOnClose = vi.fn();
                 const template = mockHalFormsTemplate({
                     title: 'Edit Group',
-                    target: '/api/family-groups/xyz',
+                    target: '/api/legal-guardian-groups/xyz',
                     method: 'PUT',
                     properties: [{name: 'name', prompt: 'Name', type: 'text', required: true}],
                 });
@@ -616,7 +709,7 @@ describe('HalFormDisplay Component', () => {
                             template={template}
                             templateName="edit"
                             resourceData={{id: 1, name: 'Existing'}}
-                            pathname="/family-groups/xyz"
+                            pathname="/legal-guardian-groups/xyz"
                             onClose={mockOnClose}
                         />
                     </Wrapper>
@@ -640,7 +733,7 @@ describe('HalFormDisplay Component', () => {
                 const pageData = createMockPageData({id: 1});
                 renderPostForm('PUT', pageData);
 
-                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 200, '/api/family-groups/xyz'));
+                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 200, '/api/legal-guardian-groups/xyz'));
 
                 await waitFor(() => expect(screen.queryByText(/Nač/)).not.toBeInTheDocument());
                 const nameInput = screen.getByDisplayValue('Existing') as HTMLInputElement;
@@ -657,7 +750,7 @@ describe('HalFormDisplay Component', () => {
                 const pageData = createMockPageData({id: 1});
                 renderPostForm('DELETE', pageData);
 
-                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 204, '/api/family-groups/xyz'));
+                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 204, '/api/legal-guardian-groups/xyz'));
 
                 await waitFor(() => expect(screen.queryByText(/Nač/)).not.toBeInTheDocument());
                 await user.click(screen.getByRole('button', {name: /odeslat/i}));
@@ -702,7 +795,7 @@ describe('HalFormDisplay Component', () => {
 
                 renderPostForm('POST', pageData);
 
-                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/family-groups/xyz'));
+                fetchSpy.mockResolvedValueOnce(createMockResponseWithLocation(null, 201, '/api/legal-guardian-groups/xyz'));
 
                 await waitFor(() => expect(screen.queryByText(/Nač/)).not.toBeInTheDocument());
                 const nameInput = screen.getByDisplayValue('Existing') as HTMLInputElement;

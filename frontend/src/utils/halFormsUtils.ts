@@ -6,8 +6,7 @@ import type {HalFormsProperty, HalFormsTemplate} from '../api';
 
 export function enrichTemplateWithReadOnlyFields(
     template: HalFormsTemplate,
-    resourceData: Record<string, unknown>,
-    fieldTypeOverrides?: Record<string, string>
+    resourceData: Record<string, unknown>
 ): HalFormsTemplate {
     const templateFieldNames = new Set(template.properties.map(p => p.name));
 
@@ -19,7 +18,7 @@ export function enrichTemplateWithReadOnlyFields(
         })
         .map(key => ({
             name: key,
-            type: fieldTypeOverrides?.[key] ?? 'text',
+            type: 'text',
             readOnly: true,
         }));
 
@@ -84,4 +83,8 @@ export function shouldFetchTargetData(
 
     // If normalized paths are the same, no need to fetch
     return normalizedTarget !== normalizedCurrent;
+}
+
+export function stripUriTemplate(href: string): string {
+    return href.replace(/\{[^}]*\}/g, '');
 }

@@ -1,14 +1,16 @@
 package com.klabis.members;
 
+import com.klabis.KlabisModuleTest;
+import com.klabis.TestApplicationConfiguration;
 import com.klabis.common.WithKlabisMockUser;
 import com.klabis.common.users.Authority;
+import com.klabis.members.legalguardiangroup.domain.LegalGuardianGroupRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.modulith.test.ApplicationModuleTest;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.jdbc.Sql;
 import org.springframework.test.web.servlet.MockMvc;
@@ -20,9 +22,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@ApplicationModuleTest
+@KlabisModuleTest(extraIncludes = "sync")
 @AutoConfigureMockMvc
-@ActiveProfiles("test")
+@Import(TestApplicationConfiguration.class)
 @DisplayName("UpdateMember persistence smoke test")
 class UpdateMemberPersistenceTest {
 
@@ -30,15 +32,11 @@ class UpdateMemberPersistenceTest {
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private com.klabis.groups.application.LastOwnershipCheckerImpl lastOwnershipCheckerImpl;
-
-    @MockitoBean
-    @SuppressWarnings("unused")
     private com.klabis.groups.traininggroup.domain.TrainingGroupRepository trainingGroupRepository;
 
     @MockitoBean
     @SuppressWarnings("unused")
-    private com.klabis.groups.familygroup.domain.FamilyGroupRepository familyGroupRepository;
+    private LegalGuardianGroupRepository legalGuardianGroupRepository;
 
     @Autowired
     private MockMvc mockMvc;

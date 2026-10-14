@@ -1112,6 +1112,7 @@ components:
             profile: display user profile information
             MEMBERS: Members
             EVENTS: Events
+            SYNC: Synchronisation
 
   parameters:
     TierIdParam:
@@ -1183,10 +1184,10 @@ components:
       in: path
       description: Member UUID
       required: true
-      # Marks the owner for operations that declare x-klabis-owner-visible. Inert on its own:
-      # @OwnerId is only consulted for a method or field already marked @OwnerVisible, so the
-      # operations here that do not opt into ownership are unaffected.
-      x-klabis-owner-id: true
+      # Identifies the target member. Inert on its own: @TargetId is only consulted for a method
+      # marked @OwnerVisible or guarded by an authority held over specific targets, so the
+      # operations here that do neither are unaffected.
+      x-klabis-target-id: MEMBER
       schema:
         type: string
         format: uuid
@@ -1205,10 +1206,10 @@ components:
       in: path
       description: Member UUID
       required: true
-      # Marks the owner for operations that declare x-klabis-owner-visible. Inert on its own:
-      # @OwnerId is only consulted for a method or field already marked @OwnerVisible, so the
-      # operations here that do not opt into ownership are unaffected.
-      x-klabis-owner-id: true
+      # Identifies the target member. Inert on its own: @TargetId is only consulted for a method
+      # marked @OwnerVisible or guarded by an authority held over specific targets, so the
+      # operations here that do neither are unaffected.
+      x-klabis-target-id: MEMBER
       schema:
         type: string
         format: uuid
@@ -1495,6 +1496,7 @@ components:
         memberId:
           type: string
           format: uuid
+          x-hal-input-type: MemberId
         year:
           type: integer
           format: int32

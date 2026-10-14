@@ -1,0 +1,39 @@
+package com.klabis.membershipfees;
+
+import com.klabis.common.CommonWebMvcMockitoBeans;
+import com.klabis.members.MembersWebMvcMockitoBeans;
+import com.klabis.sync.SyncWebMvcMockitoBeans;
+import com.klabis.common.KlabisWebMvcSliceConfiguration;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.modulith.test.ApplicationModuleTest;
+import org.springframework.modulith.test.ModuleSlicing;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.lang.annotation.*;
+
+/**
+ * Single shared {@code @WebMvcTest} context for all REST adapter tests of the membershipfees module.
+ * <p>
+ * STANDALONE slicing loads membershipfees and shared {@code common}; {@code members} is included because
+ * {@code MemberFeeSummaryLinkProcessor} adds the {@code feeSummary} link to member responses and the
+ * {@code @ActingMember} argument resolver lives there. {@code sync} is included because the members controller
+ * injects {@code SynchronizationPort}. Every collaborator is a primary port mocked through the per-module
+ * {@code *WebMvcMockitoBeans}.
+ * <p>
+ * Tests must stub mocks via {@code @Autowired} fields; a {@code @MockitoBean} declared in a test class
+ * creates a new context and defeats the sharing.
+ */
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@Documented
+@WebMvcTest
+@ModuleSlicing(module = "membershipfees", extraIncludes = {"members", "sync"}, mode = ApplicationModuleTest.BootstrapMode.STANDALONE, verifyAutomatically = false)
+@ActiveProfiles("test")
+@Import(KlabisWebMvcSliceConfiguration.class)
+@MembershipFeesWebMvcMockitoBeans
+@CommonWebMvcMockitoBeans
+@MembersWebMvcMockitoBeans
+@SyncWebMvcMockitoBeans
+public @interface MembershipFeesWebMvcTest {
+}

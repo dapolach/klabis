@@ -37,3 +37,11 @@ backend/local.env
 /docs/openapi/generated/
 /docs/openapi/build/
 /tools/openapi-bundle/node_modules/
+/http-client.private.env.json
+/.opencode/package-lock.json
+/opencode.jsonc
+
+# scratch space for local logs and throwaway scripts
+/.tmp/
+.factorypath
+backend/.factorypath

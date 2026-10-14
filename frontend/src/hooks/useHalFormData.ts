@@ -96,7 +96,7 @@ export function useHalFormData(
         return shouldFetchTargetData(selectedTemplate.target, currentPathname);
     }, [selectedTemplate, currentPathname]);
 
-    const targetUrl = selectedTemplate?.target && normalizeKlabisApiPath(selectedTemplate?.target);
+    const targetUrl = selectedTemplate?.target ? normalizeKlabisApiPath(selectedTemplate.target) : '';
 
     // Phase 1: Probe the target via OPTIONS to determine whether GET is supported.
     // Only fires when shouldFetch is true so we don't probe same-resource targets.

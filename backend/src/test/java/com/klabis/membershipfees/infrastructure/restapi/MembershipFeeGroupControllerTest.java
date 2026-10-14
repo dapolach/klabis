@@ -1,9 +1,7 @@
 package com.klabis.membershipfees.infrastructure.restapi;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
-import com.klabis.common.ui.HalFormsSupport;
+import com.klabis.membershipfees.MembershipFeesWebMvcTest;
 import com.klabis.common.users.Authority;
 import com.klabis.finance.domain.Money;
 import com.klabis.members.MemberDto;
@@ -22,10 +20,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.hateoas.MediaTypes;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
@@ -44,9 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DisplayName("MembershipFeeGroupController API tests")
-@WebMvcTest(controllers = MembershipFeeGroupController.class)
-@Import({EncryptionConfiguration.class, HalFormsSupport.class})
-@WithPostprocessors
+@MembershipFeesWebMvcTest
 class MembershipFeeGroupControllerTest {
 
     private static final UUID GROUP_UUID = UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc");
@@ -56,13 +49,13 @@ class MembershipFeeGroupControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
-    @MockitoBean
+    @Autowired
     private FeeSelectionCampaignManagementPort managementPort;
 
-    @MockitoBean
+    @Autowired
     private AdminFeeAssignmentPort adminFeeAssignmentPort;
 
-    @MockitoBean
+    @Autowired
     private Members members;
 
     private static final LocalDate VOTING_DEADLINE = LocalDate.of(2026, 3, 31);
@@ -155,7 +148,7 @@ class MembershipFeeGroupControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.memberCount").value(0))
                     // The relation must survive an empty collection: the _embedded block is assembled
-                    // from the controller's HalResponseContext.embed declaration, and without the
+                    // from the controller's HalResponseContext.embedDeferred declaration, and without the
                     // itemType fallback an empty list would drop the "members" key entirely.
                     .andExpect(jsonPath("$._embedded.members").isArray())
                     .andExpect(jsonPath("$._embedded.members").isEmpty());
@@ -243,6 +236,24 @@ class MembershipFeeGroupControllerTest {
                             "http://localhost/api/membership-fee-groups/" + GROUP_UUID + "/members"))
                     .andExpect(jsonPath("$._templates.assignMember.properties[?(@.name=='memberId')]").exists())
                     .andExpect(jsonPath("$._templates.assignMember.properties[?(@.name=='year')]").exists());
+        }
+
+        @Test
+        @DisplayName("assignMember template should expose memberId property with an options.link pointing at the member options endpoint")
+        @WithKlabisMockUser(memberId = ADMIN_MEMBER_ID, authorities = {Authority.MEMBERS_MANAGE})
+        void shouldExposeMemberIdOptionsLinkOnAssignMemberTemplate() throws Exception {
+            MembershipFeeGroup group = buildFrozenGroup();
+            when(managementPort.getGroup(new MembershipFeeGroupId(GROUP_UUID))).thenReturn(group);
+            when(members.findByIds(any())).thenReturn(Map.of());
+
+            mockMvc.perform(
+                            get("/api/membership-fee-groups/{id}", GROUP_UUID)
+                                    .accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$._templates.assignMember.properties[?(@.name=='memberId')].options.link.href")
+                            .value("http://localhost/api/members/options"))
+                    .andExpect(jsonPath("$._templates.assignMember.properties[?(@.name=='memberId')].type")
+                            .value("MemberId"));
         }
     }
 

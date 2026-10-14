@@ -3,7 +3,9 @@
 ## Purpose
 
 Covers the creation, management, and lifecycle of club events. Defines how event managers create and update events, how events transition through statuses (draft, active, finished, cancelled), how members discover events in the list, and how registration deadlines control when members can sign up.
+
 ## Requirements
+
 ### Requirement: Registration Deadline
 
 The system SHALL support up to three optional registration deadlines per event. When set, deadlines determine the last dates when members can register or unregister; the registration window remains open until the latest set deadline passes.
@@ -177,7 +179,7 @@ The system SHALL allow an event manager to select multiple ORIS events at once i
 
 ### Requirement: Row-Level Management Actions in Events Table
 
-The system SHALL expose row-level management actions for events directly in the events list for users with EVENTS:MANAGE permission. The available actions for each row depend on the event status and whether the event was imported from ORIS. The actions are driven by HAL-Forms affordances attached to each row and render only when the current user is authorized.
+The system SHALL expose row-level management actions for events directly in the events list for users with EVENTS:MANAGE permission. The available actions for each row depend on the event status and whether the event was imported from ORIS. The actions are driven by HAL-Forms affordances attached to each row and render only when the current user is authorized. For an ORIS-imported DRAFT or ACTIVE event, the row SHALL show a synchronisation status indicator instead of a direct "Synchronizovat" action; opening it lets the manager trigger synchronisation and see the current synchronisation state, consistent with the event detail page.
 
 #### Scenario: Manager sees Upravit and Zrušit actions for a DRAFT event in the list
 
@@ -189,23 +191,24 @@ The system SHALL expose row-level management actions for events directly in the 
 - **WHEN** user with EVENTS:MANAGE permission views the events list
 - **THEN** each ACTIVE event row shows "Upravit" and "Zrušit" actions
 
-#### Scenario: Manager sees Synchronizovat action for an ORIS-imported DRAFT or ACTIVE event
+#### Scenario: Manager sees synchronisation status indicator for an ORIS-imported DRAFT or ACTIVE event
 
 - **WHEN** user with EVENTS:MANAGE permission views the events list
 - **AND** an event row is in DRAFT or ACTIVE status and was imported from ORIS
-- **THEN** the row additionally shows a "Synchronizovat" action
+- **THEN** the row additionally shows a synchronisation status indicator
+- **AND** opening it offers a way to synchronise the event now
 
-#### Scenario: Non-ORIS event does not show Synchronizovat action in the list
+#### Scenario: Non-ORIS event does not show a synchronisation status indicator in the list
 
 - **WHEN** user with EVENTS:MANAGE permission views the events list
 - **AND** an event row was not imported from ORIS
-- **THEN** the row does NOT show a "Synchronizovat" action
+- **THEN** the row does NOT show a synchronisation status indicator
 
 #### Scenario: FINISHED or CANCELLED event has no management actions in the list
 
 - **WHEN** user with EVENTS:MANAGE permission views the events list
 - **AND** an event row is in FINISHED or CANCELLED status
-- **THEN** the row shows no management actions (no edit, cancel, or sync)
+- **THEN** the row shows no management actions (no edit, cancel, or synchronisation status indicator)
 
 #### Scenario: Regular member sees only the register action in the list
 
@@ -221,7 +224,7 @@ The system SHALL expose row-level management actions for events directly in the 
 
 ### Requirement: Events Table Display
 
-The system SHALL display the events list as a table with key columns and a filter bar. The status column is only shown to users with EVENTS:MANAGE permission. The filter bar exposes fulltext search, a time window selector (Budoucí / Proběhlé / Vše), and — for users with a member profile — a "Moje přihlášky" toggle. The default sort order depends on the active time window: upcoming events are sorted by event date ascending (nearest first), past and all events are sorted by event date descending (most recent first).
+The system SHALL display the events list as a table with key columns and a filter bar. The status column is only shown to users with EVENTS:MANAGE permission. The name of a cancelled event SHALL be rendered struck through for every user who can see the row; the rest of the row, including its actions, is displayed normally. The filter bar exposes fulltext search, a time window selector (Budoucí / Proběhlé / Vše), and — for users with a member profile — a "Moje přihlášky" toggle. The default sort order depends on the active time window: upcoming events are sorted by event date ascending (nearest first), past and all events are sorted by event date descending (most recent first).
 
 #### Scenario: Regular member views events table
 
@@ -232,6 +235,13 @@ The system SHALL display the events list as a table with key columns and a filte
 
 - **WHEN** user with EVENTS:MANAGE permission views the events list page
 - **THEN** the table additionally shows the event status column
+
+#### Scenario: Cancelled event name is struck through in the table
+
+- **WHEN** a user who is allowed to see a cancelled event views the events list
+- **THEN** the event name in that row is rendered struck through
+- **AND** the struck name also carries the cancelled state as visually hidden text, so a screen reader announces it
+- **AND** the rest of the row is displayed normally
 
 #### Scenario: Website link shown as clickable icon
 
@@ -291,11 +301,6 @@ The system SHALL display the events list as a table with key columns and a filte
 - **AND** the current user has no management actions available for that row
 - **THEN** the action column is empty for that row
 
-#### Scenario: Status column hidden when not returned by API
-
-- **WHEN** the API response does not include the status field (field-level security)
-- **THEN** the status column is not displayed in the table
-
 #### Scenario: Filter bar is visible on the events list
 
 - **WHEN** a user opens the events list page
@@ -336,7 +341,7 @@ The system SHALL display the events list as a table with key columns and a filte
 
 ### Requirement: Event Detail Page
 
-The application SHALL display the event detail page with location and registration deadline (when set) and categories (when defined), and allow managers to edit them inline. The registrations section and the link to the registrations list SHALL only be shown for events that are not in DRAFT status.
+The application SHALL display the event detail page with location and registration deadline (when set) and categories (when defined), and allow managers to edit them inline. The registrations section and the link to the registrations list SHALL only be shown for events that are not in DRAFT status. For a cancelled event the detail page SHALL render the event name struck through, show a prominent "Zrušeno" badge, and display the cancellation reason directly under the name when a reason was provided.
 
 #### Scenario: Event detail shows location when set
 
@@ -393,6 +398,20 @@ The application SHALL display the event detail page with location and registrati
 
 - **WHEN** user views the detail page for an event in ACTIVE status
 - **THEN** the registrations section is shown with the link to the registrations list
+
+#### Scenario: Cancelled event detail shows struck-through name, badge and reason
+
+- **WHEN** a user views the detail page of a cancelled event that has a cancellation reason
+- **THEN** the event name is rendered struck through
+- **AND** a prominent "Zrušeno" badge is shown next to the name
+- **AND** the cancellation reason is displayed directly under the name
+
+#### Scenario: Cancelled event detail without a reason
+
+- **WHEN** a user views the detail page of a cancelled event that has no cancellation reason
+- **THEN** the event name is rendered struck through
+- **AND** the "Zrušeno" badge is shown next to the name
+- **AND** no reason text is displayed
 
 ### Requirement: Create Event
 
@@ -451,7 +470,7 @@ The system SHALL allow users with EVENTS:MANAGE permission to create events. Req
 
 ### Requirement: Update Event
 
-The system SHALL allow users with EVENTS:MANAGE permission OR any member in the event's coordinators collection to update events in DRAFT or ACTIVE status. Editable fields include categories and the coordinators collection.
+The system SHALL allow users with EVENTS:MANAGE permission OR any member in the event's coordinators collection to update events in DRAFT or ACTIVE status. Editable fields include categories and the coordinators collection. Only users with EVENTS:MANAGE permission SHALL be able to change the coordinators collection; a coordinator without EVENTS:MANAGE sees the coordinators read-only in the edit form.
 
 #### Scenario: Manager updates a DRAFT event
 
@@ -490,11 +509,23 @@ The system SHALL allow users with EVENTS:MANAGE permission OR any member in the 
 - **WHEN** user adds the same member twice to the coordinators field during update and submits
 - **THEN** the event is updated with that member listed once
 
+#### Scenario: Coordinator cannot change the coordinators
+
+- **GIVEN** a member who is listed as a coordinator of a DRAFT or ACTIVE event and has no EVENTS:MANAGE permission
+- **WHEN** the coordinator opens the edit form of that event
+- **THEN** the coordinators are shown read-only
+- **AND** the coordinator can still change and save the other event fields
+
+#### Scenario: Manager changes the coordinators
+
+- **WHEN** a user with EVENTS:MANAGE permission adds or removes a coordinator in the edit form of a DRAFT or ACTIVE event and saves
+- **THEN** the event is updated with the new coordinators
+
 ### Requirement: Event Status Lifecycle
 
 The system SHALL manage event status transitions: DRAFT → ACTIVE → FINISHED or CANCELLED. The transition from ACTIVE to FINISHED is performed exclusively by the automatic completion process; there is no manual "finish" action available to managers.
 
-When cancelling an event, the manager MAY provide an optional cancellation reason (free text, up to 500 characters). The reason SHALL be stored with the event and SHALL be displayed to viewers of the cancelled event detail; if a reason is set, summary views (e.g. event list) SHALL surface it as supplementary text on the cancelled row.
+When cancelling an event, the manager MAY provide an optional cancellation reason (free text, up to 500 characters). The reason SHALL be stored with the event and SHALL be displayed to viewers of the cancelled event detail directly under the event name. In summary views (e.g. the event list) a cancelled event is marked by its struck-through name.
 
 #### Scenario: Manager publishes a DRAFT event
 
@@ -511,20 +542,20 @@ When cancelling an event, the manager MAY provide an optional cancellation reaso
 
 - **WHEN** user with EVENTS:MANAGE permission cancels a DRAFT event and provides a cancellation reason
 - **THEN** the event becomes CANCELLED with the reason recorded
-- **AND** the cancellation reason is shown on the event detail page
+- **AND** the cancellation reason is shown on the event detail page under the event name
 
 #### Scenario: Manager cancels an ACTIVE event with a reason
 
 - **WHEN** user with EVENTS:MANAGE permission cancels an ACTIVE event and provides a cancellation reason
 - **THEN** the event becomes CANCELLED with the reason recorded
 - **AND** existing registrations are preserved for records
-- **AND** the cancellation reason is shown on the event detail page
+- **AND** the cancellation reason is shown on the event detail page under the event name
 
-#### Scenario: Cancellation reason is shown on the cancelled event row in the list
+#### Scenario: Cancelled event is marked in the event list
 
-- **GIVEN** a cancelled event with a recorded cancellation reason
-- **WHEN** a user views the event list
-- **THEN** the cancelled status indicator on that row exposes the reason as a tooltip or supplementary text
+- **GIVEN** an event has been cancelled
+- **WHEN** a user who is allowed to see that event views the event list
+- **THEN** the event name on that row is rendered struck through
 
 #### Scenario: Invalid status transition shows error
 
@@ -548,12 +579,24 @@ The system SHALL automatically transition ACTIVE events to FINISHED status after
 
 ### Requirement: List Events
 
-The system SHALL show a paginated event list. DRAFT events are only visible to users with EVENTS:MANAGE permission. By default the list shows only upcoming events (events whose date is today or later). The list can be filtered by status, organizer, date range, coordinator, fulltext (event name and location), and registered-by-me. Multiple filters combine with AND semantics.
+The system SHALL show a paginated event list. DRAFT events are only visible to users with EVENTS:MANAGE permission. CANCELLED events are only visible to users with EVENTS:MANAGE permission and to members registered for that event — every other user does not see them in the list at all. By default the list shows only upcoming events (events whose date is today or later). The list can be filtered by status, organizer, date range, coordinator, fulltext (event name and location), and registered-by-me. Multiple filters combine with AND semantics.
 
 #### Scenario: Regular user does not see DRAFT events
 
 - **WHEN** user without EVENTS:MANAGE permission views the event list
 - **THEN** no DRAFT events are shown
+
+#### Scenario: Regular user does not see CANCELLED events
+
+- **WHEN** user without EVENTS:MANAGE permission views the event list
+- **AND** the user is not registered for a cancelled event
+- **THEN** that cancelled event is not shown
+
+#### Scenario: Registered member sees a cancelled event they are registered for
+
+- **WHEN** a member without EVENTS:MANAGE permission views the event list
+- **AND** an event the member is registered for has been cancelled
+- **THEN** that cancelled event is shown in the list, subject to the other active filters
 
 #### Scenario: Manager sees all events including DRAFT
 
@@ -570,6 +613,12 @@ The system SHALL show a paginated event list. DRAFT events are only visible to u
 - **WHEN** user without EVENTS:MANAGE permission filters events by DRAFT status
 - **THEN** the list is empty and no DRAFT events are disclosed
 
+#### Scenario: Regular user filtering by CANCELLED sees only their own cancelled events
+
+- **WHEN** user without EVENTS:MANAGE permission filters events by CANCELLED status
+- **THEN** only cancelled events the user is registered for are shown
+- **AND** a user not registered for any cancelled event sees no results
+
 #### Scenario: User can filter events by organizer
 
 - **WHEN** user filters the event list by organizer code
@@ -584,11 +633,6 @@ The system SHALL show a paginated event list. DRAFT events are only visible to u
 
 - **WHEN** user filters the event list by a coordinator member
 - **THEN** only events where that member appears anywhere in the coordinators collection are shown
-
-#### Scenario: Event status visible only to manager in list
-
-- **WHEN** user without EVENTS:MANAGE permission views the event list
-- **THEN** the event status is not shown
 
 #### Scenario: Default view shows only upcoming events
 
@@ -686,7 +730,7 @@ The system SHALL show a paginated event list. DRAFT events are only visible to u
 
 ### Requirement: Get Event Detail
 
-The system SHALL display complete event detail including categories. DRAFT events are only visible to users with EVENTS:MANAGE permission.
+The system SHALL display complete event detail including categories. DRAFT events are only visible to users with EVENTS:MANAGE permission. CANCELLED events remain accessible to every authenticated user — hiding cancelled events applies to the events list only, not to the detail page.
 
 #### Scenario: User views event detail
 
@@ -703,6 +747,11 @@ The system SHALL display complete event detail including categories. DRAFT event
 
 - **WHEN** user without EVENTS:MANAGE permission navigates to a DRAFT event's detail page
 - **THEN** the page shows not found
+
+#### Scenario: Any authenticated user can open a cancelled event detail
+
+- **WHEN** an authenticated user without EVENTS:MANAGE permission opens the detail page of a cancelled event, even without being registered for it
+- **THEN** the detail page is displayed with the cancelled treatment (struck-through name, "Zrušeno" badge, and the reason when provided)
 
 #### Scenario: Manager views DRAFT event detail
 
@@ -795,6 +844,8 @@ The system SHALL provide a single action that synchronizes every ORIS-imported e
 
 The action SHALL process matching events sequentially. A failure on one event SHALL NOT abort the operation; the system SHALL continue processing the remaining events and report a summary at the end with the number of successful syncs, the number of failures, and per-event details for failures (event id, name, error description).
 
+Events that are waiting for a manager's decision about a difference against ORIS, and events that have stopped after repeated failures, SHALL NOT be synchronized by this action. They SHALL be reported separately in the summary, with their name and what they are waiting for, so that the manager can resolve them individually. The action SHALL synchronize every other matching event regardless of when it was last synchronized.
+
 The action SHALL be idempotent — running it twice in a row with no upstream changes SHALL produce the same result as running it once.
 
 #### Scenario: Manager triggers bulk sync with all events in good state
@@ -811,6 +862,21 @@ The action SHALL be idempotent — running it twice in a row with no upstream ch
 - **THEN** the system synchronizes the four successful events and skips the failed one
 - **AND** the result dialog shows "4 úspěšně synchronizováno, 1 chyba"
 - **AND** the dialog lists the failed event's name and the error reason
+
+#### Scenario: Bulk sync reports events waiting for a decision instead of syncing them
+
+- **GIVEN** the events list contains four ORIS-imported upcoming events, one of which is waiting for a manager's decision about a difference against ORIS
+- **WHEN** the manager triggers the bulk sync
+- **THEN** the three other events are synchronized
+- **AND** the event waiting for a decision is left untouched
+- **AND** the summary names it separately as waiting for a decision, rather than counting it as a failure
+
+#### Scenario: Bulk sync reports events stopped by repeated failures
+
+- **GIVEN** the events list contains ORIS-imported upcoming events, one of which stopped after repeated failures
+- **WHEN** the manager triggers the bulk sync
+- **THEN** the stopped event is not attempted
+- **AND** the summary names it separately as needing manual attention
 
 #### Scenario: Bulk sync excludes finished, cancelled, and past events
 
@@ -1081,6 +1147,24 @@ An event manager SHALL be able to set or change an event's ranking and base entr
 - **WHEN** an event manager edits an imported event and changes its base entry fee
 - **THEN** the event detail shows the corrected base entry fee
 
+### Requirement: Event List Rows Expose Shared-Offer Flags
+
+The event list representation (used by the events table rows and the dashboard closing-deadlines widget rows) SHALL include, for each event, whether the shared transport offer and the shared accommodation offer are turned on, so that a registration form opened from a list row can show each shared-service choice exactly when the event offers it (per the event-registrations specification).
+
+#### Scenario: Event list rows carry the shared-offer flags
+
+- **GIVEN** an event with the shared transport offer on and the shared accommodation offer off
+- **WHEN** the events list is fetched
+- **THEN** that event's list row shows the shared transport offer as on
+- **AND** the same row shows the shared accommodation offer as off
+
+#### Scenario: Registration dialog opened from a list row shows choices per the offers
+
+- **GIVEN** a list row (events table or dashboard closing-deadlines widget) of an event with the shared accommodation offer on and the shared transport offer off
+- **WHEN** a member opens the registration dialog from that row
+- **THEN** the dialog shows the shared accommodation tick box
+- **AND** no shared transport tick box is shown
+
 ### Requirement: Coordinator Implicit Edit Authority
 
 Any member listed in an event's coordinators collection SHALL have the same implicit edit authority over that event as a user with EVENTS:MANAGE permission, limited to updating the event and viewing registrations. This authority is event-scoped: it does not extend to other events.
@@ -1106,3 +1190,350 @@ Any member listed in an event's coordinators collection SHALL have the same impl
 - **WHEN** an already-imported event is updated by syncing from ORIS
 - **THEN** the coordinators collection is left unchanged
 
+### Requirement: ORIS-Imported Events Are Kept In Step Automatically
+
+The system SHALL keep an event imported from ORIS in step with ORIS from then on, without a manager having to ask for it. Changes published in ORIS SHALL reach the event on their own. The system SHALL stop keeping an event in step once it is finished or cancelled, and SHALL keep the record of its past synchronisations available.
+
+#### Scenario: An event imported from ORIS starts being kept in step
+
+- **WHEN** an event manager imports an event from ORIS
+- **THEN** the event is from then on kept in step with its ORIS counterpart automatically
+- **AND** the manager can still synchronise it on demand as before
+
+#### Scenario: A change published in ORIS reaches the event
+
+- **GIVEN** an ORIS-imported event that nobody has edited in Klabis
+- **WHEN** the organiser changes the event in ORIS — for example moving the registration deadline
+- **THEN** the event in Klabis is updated to match ORIS without anyone asking for it
+
+#### Scenario: A finished event stops being kept in step
+
+- **WHEN** an ORIS-imported event becomes finished or is cancelled
+- **THEN** it is no longer synchronised with ORIS
+- **AND** its last successful synchronisation remains visible
+
+### Requirement: Imported ORIS Events Are Synchronized From The Moment They Are Imported
+
+The system SHALL keep an event imported from ORIS synchronized with ORIS from the moment the import completes, without waiting for a scheduled synchronization run. The import itself SHALL appear in the event's synchronization history, recording the manager who performed it.
+
+#### Scenario: Manager imports an event and sees it as synchronized
+
+- **WHEN** event manager imports an event from ORIS
+- **THEN** the event is created in DRAFT status with the values from ORIS
+- **AND** the event immediately shows as being in step with ORIS, without a scheduled run having to happen first
+
+#### Scenario: The import appears in the event's synchronization history
+
+- **WHEN** event manager imports an event from ORIS
+- **AND** the manager then opens that event's synchronization state
+- **THEN** the history shows the synchronization that ran as part of the import, recording the manager who imported it
+
+### Requirement: Re-Importing An ORIS Event Synchronizes It Instead Of Failing
+
+The system SHALL NOT report an error when an event manager imports an ORIS event that is already present in Klabis. The system SHALL synchronize the existing event with ORIS instead and give the manager that event. A change the club made in Klabis to a field ORIS owns SHALL NOT be discarded by a repeated import; where the two sides now differ, the manager SHALL be asked to decide, exactly as for any other synchronization.
+
+Where the event is already waiting for a manager's decision about a difference against ORIS, or has stopped after repeated failures, the system SHALL refuse the import and point the manager at the outstanding decision.
+
+#### Scenario: Manager imports an ORIS event that is already in Klabis
+
+- **WHEN** event manager imports an ORIS event that is already present in Klabis
+- **THEN** no second event is created
+- **AND** the existing event is synchronized with ORIS
+- **AND** the manager is taken to the existing event
+
+#### Scenario: A club's own change survives a repeated import
+
+- **WHEN** someone in the club has changed a field on an imported event that ORIS also owns
+- **AND** an event manager then imports that same ORIS event again
+- **THEN** the club's change is not overwritten
+- **AND** the event is shown as waiting for a manager's decision about the difference against ORIS
+
+#### Scenario: Manager re-imports an event that is waiting for a decision
+
+- **WHEN** event manager imports an ORIS event whose Klabis event is already waiting for a decision about a difference against ORIS
+- **THEN** the import is refused
+- **AND** the manager is pointed at the outstanding decision for that event
+
+#### Scenario: Batch import counts an already-present event as imported
+
+- **WHEN** event manager imports several ORIS events at once and one of them is already present in Klabis
+- **THEN** that event is synchronized and reported as imported alongside the newly created ones
+- **AND** the manager is not shown a failure for it
+
+### Requirement: Re-Importing A Finished Or Cancelled ORIS Event Resumes Its Synchronization
+
+An event that has finished or been cancelled stops being synchronized with ORIS. When an event manager deliberately imports that same ORIS event again, the system SHALL resume synchronizing it and SHALL take the current values from ORIS, rather than continuing from what the two sides last agreed on before synchronization stopped. Scheduled synchronization runs SHALL NOT resume such an event on their own.
+
+#### Scenario: Manager re-imports a cancelled event
+
+- **WHEN** event manager imports an ORIS event whose Klabis event was cancelled and is no longer synchronized
+- **THEN** the event is synchronized with ORIS again and takes the current ORIS values
+- **AND** it is included in scheduled synchronization runs from then on
+- **AND** its earlier synchronization history remains visible
+
+#### Scenario: A finished event is not resumed by a scheduled run
+
+- **WHEN** an imported event has finished and scheduled synchronization runs
+- **THEN** the finished event stays out of those runs
+
+### Requirement: A Manager's Edit To An ORIS Field Is Never Silently Overwritten
+
+ORIS does not accept changes to an event from Klabis, so an edit made in Klabis to a field that ORIS owns — the name, date, location, organiser, website, registration deadlines, ranking or base entry fee — SHALL NOT be sent to ORIS. The next synchronisation SHALL NOT discard such an edit. Instead the event SHALL stop being synchronised and SHALL ask the manager to decide, showing what differs from ORIS.
+
+#### Scenario: A manager's edit survives the next synchronisation
+
+- **GIVEN** an ORIS-imported event
+- **WHEN** an event manager edits the event's name
+- **AND** the event is synchronised with ORIS afterwards
+- **THEN** the manager's name is kept
+- **AND** the event is marked as needing a decision about the difference against ORIS
+
+#### Scenario: The manager sees what differs from ORIS
+
+- **WHEN** an event manager opens the synchronisation state of an event that needs a decision
+- **THEN** they see the values held in Klabis and the values held in ORIS
+- **AND** for each differing field they see whether it was changed in Klabis, in ORIS, or in both
+
+#### Scenario: Synchronisation of that event pauses until the manager decides
+
+- **GIVEN** an ORIS-imported event that needs a decision
+- **WHEN** further synchronisation runs take place
+- **THEN** the event is left untouched
+- **AND** it continues to be reported as needing a decision
+
+#### Scenario: The manager discards their edit and takes the ORIS values
+
+- **GIVEN** an event that needs a decision, whose difference the manager has confirmed seeing
+- **WHEN** the manager chooses to take the ORIS values
+- **THEN** the event is updated to match ORIS
+- **AND** the event is kept in step automatically again
+
+#### Scenario: The manager keeps a deliberate difference from ORIS
+
+- **GIVEN** an event that needs a decision, whose difference the manager has confirmed seeing
+- **WHEN** the manager chooses to keep the difference — because the Klabis value is deliberately not the ORIS one
+- **THEN** the event keeps its Klabis values and ORIS keeps its own
+- **AND** the event is kept in step automatically again
+- **AND** a later change in ORIS asks the manager to decide again instead of overwriting the value they kept
+
+#### Scenario: Sending Klabis values to ORIS is never offered
+
+- **WHEN** an event manager resolves a difference on an ORIS-imported event
+- **THEN** sending the Klabis values to ORIS is not offered, because ORIS does not accept event changes from Klabis
+- **AND** taking the ORIS values and keeping the difference remain available
+
+#### Scenario: Editing fields ORIS does not own never causes a decision
+
+- **GIVEN** an ORIS-imported event
+- **WHEN** an event manager changes a category fee override, adds a category of their own, or sets the event type
+- **AND** the event is synchronised with ORIS afterwards
+- **THEN** those changes are kept
+- **AND** no decision is asked of anyone, because ORIS does not own those fields
+
+#### Scenario: The manager fixes the event in ORIS instead
+
+- **GIVEN** an ORIS-imported event that needs a decision, which the manager organises themselves
+- **WHEN** the manager corrects the event directly in ORIS so that both sides hold the same values
+- **THEN** the event stops needing a decision on its own
+- **AND** it is kept in step automatically again
+
+### Requirement: An Event Stopped By Repeated Synchronisation Failures Can Be Restarted
+
+When synchronising an event with ORIS keeps failing, the system SHALL stop attempting the event and SHALL let it wait for a manager, rather than failing silently every night. The system SHALL allow a manager to restart it once the cause is gone.
+
+#### Scenario: A repeatedly failing event stops and says so
+
+- **WHEN** synchronising an ORIS-imported event fails repeatedly
+- **THEN** the event stops being synchronised
+- **AND** its synchronisation state reports that it needs manual attention, with the reason of the most recent failure
+
+#### Scenario: The manager restarts a stopped event
+
+- **GIVEN** an ORIS-imported event stopped after repeated failures
+- **WHEN** an event manager restarts its synchronisation
+- **THEN** the event is synchronised again from the next run onwards
+
+### Requirement: Synchronisation State Is Reachable From The Event
+
+An ORIS-imported event SHALL expose its synchronisation state to users allowed to manage synchronisation: whether it is in step, failing, waiting for a decision or stopped, when it was last successfully synchronised, and what differs when a decision is needed. This state SHALL be reachable both from the events list and from the event detail page.
+
+#### Scenario: The manager opens an event's synchronisation state from the detail page
+
+- **WHEN** a user allowed to manage synchronisation views an ORIS-imported event's detail page
+- **THEN** they can open its synchronisation state from there
+
+#### Scenario: The manager opens an event's synchronisation state from the events list
+
+- **WHEN** a user allowed to manage synchronisation views the events list
+- **THEN** they can open an ORIS-imported event's synchronisation state directly from its row
+
+#### Scenario: An event not imported from ORIS has no synchronisation state
+
+- **WHEN** a user views an event that was created manually in Klabis
+- **THEN** no synchronisation state is offered for it, neither in the list nor on the detail page
+
+### Requirement: Shared Transport And Shared Accommodation Options On An Event
+
+A manager or event coordinator SHALL be able to turn on, per event, an offer of shared transport and an offer of shared accommodation. The two offers are independent: either, both, or neither can be turned on. Both are off by default. The offers can be turned on or off while the event is in DRAFT or ACTIVE status, and cannot be changed once the event is FINISHED or CANCELLED.
+
+Turning an offer off is always allowed, even when members have already asked to use it. Those member choices are kept but stop being shown anywhere; turning the offer back on makes them visible again.
+
+#### Scenario: Manager turns on shared transport when creating an event
+
+- **WHEN** a user with EVENTS:MANAGE permission creates an event and ticks "Nabídnout společnou dopravu"
+- **THEN** the event is created with the shared transport offer turned on
+- **AND** the shared accommodation offer stays off unless also ticked
+
+#### Scenario: Event is created with both offers off by default
+
+- **WHEN** a user with EVENTS:MANAGE permission creates an event without touching the shared transport or shared accommodation fields
+- **THEN** the event is created with both offers off
+
+#### Scenario: Manager turns on shared accommodation on an existing event
+
+- **GIVEN** an ACTIVE event with the shared accommodation offer off
+- **WHEN** a user with EVENTS:MANAGE permission edits the event and ticks "Nabídnout společné ubytování"
+- **THEN** the event is updated with the shared accommodation offer turned on
+
+#### Scenario: Coordinator changes the offers without EVENTS:MANAGE
+
+- **GIVEN** a DRAFT or ACTIVE event that lists the current user as a coordinator
+- **WHEN** the coordinator edits the event and changes the shared transport or shared accommodation offer
+- **THEN** the event is updated with the new setting
+- **AND** no EVENTS:MANAGE permission is required
+
+#### Scenario: Inline edit on the event detail page includes the two offers
+
+- **WHEN** a manager or coordinator edits an event inline on the detail page
+- **THEN** the form shows a "Nabídnout společnou dopravu" tick box and a "Nabídnout společné ubytování" tick box reflecting the current settings
+
+#### Scenario: Turning off an offer that members have already chosen
+
+- **GIVEN** an ACTIVE event with the shared accommodation offer on and several members who asked to use shared accommodation
+- **WHEN** a manager or coordinator turns the shared accommodation offer off
+- **THEN** the event is updated with the offer off
+- **AND** no error is shown
+- **AND** the accommodation choices made by those members are retained but no longer shown
+
+#### Scenario: Turning an offer back on restores earlier choices
+
+- **GIVEN** an event where the shared accommodation offer was turned off after members had chosen it
+- **WHEN** a manager or coordinator turns the shared accommodation offer back on
+- **THEN** the earlier accommodation choices are shown again in the count summary and the accommodation list
+
+#### Scenario: Offers cannot be changed on a finished or cancelled event
+
+- **WHEN** a user attempts to change the shared transport or shared accommodation offer on a FINISHED or CANCELLED event
+- **THEN** the system shows an error that the event can no longer be modified
+
+### Requirement: Shared Transport And Accommodation Count Summary On The Event Detail Page
+
+On the detail page of an ACTIVE event, for each offer that is turned on, the event coordinator and users with the EVENTS:REGISTRATIONS authority SHALL see how many registered members have asked to use that offer. The summary shows a separate line per turned-on offer and is shown even when the count is zero. Members without the EVENTS:REGISTRATIONS authority who are not the coordinator do not see the summary. The summary is not shown for DRAFT, FINISHED, or CANCELLED events, nor for an offer that is turned off.
+
+#### Scenario: Coordinator sees the count summary for both offers
+
+- **GIVEN** an ACTIVE event with both the shared transport and shared accommodation offers turned on
+- **WHEN** the event coordinator opens the event detail page
+- **THEN** the page shows a line "Společná doprava: N členů" with the number of registered members who asked for shared transport
+- **AND** a line "Společné ubytování: M členů" with the number of registered members who asked for shared accommodation
+
+#### Scenario: User with EVENTS:REGISTRATIONS sees the count summary
+
+- **GIVEN** an ACTIVE event with at least one offer turned on
+- **WHEN** a user with the EVENTS:REGISTRATIONS authority opens the event detail page
+- **THEN** the count summary is shown for each turned-on offer
+
+#### Scenario: Summary line is shown even when nobody has chosen the offer
+
+- **GIVEN** an ACTIVE event with the shared transport offer turned on and no member has asked to use it
+- **WHEN** the event coordinator opens the event detail page
+- **THEN** the page shows "Společná doprava: 0 členů"
+
+#### Scenario: Only turned-on offers appear in the summary
+
+- **GIVEN** an ACTIVE event with the shared transport offer on and the shared accommodation offer off
+- **WHEN** the event coordinator opens the event detail page
+- **THEN** the summary shows the shared transport line
+- **AND** no shared accommodation line is shown
+
+#### Scenario: Regular member does not see the count summary
+
+- **GIVEN** an ACTIVE event with an offer turned on
+- **WHEN** an authenticated member who is not the coordinator and has no EVENTS:REGISTRATIONS authority opens the event detail page
+- **THEN** no count summary is shown
+
+#### Scenario: Summary is not shown for a non-active event
+
+- **GIVEN** a DRAFT event with an offer turned on
+- **WHEN** the event coordinator opens the event detail page
+- **THEN** no count summary is shown
+
+### Requirement: SI Policy Of An Event
+
+A manager or event coordinator SHALL be able to set, per event, how the event uses SI cards: "Nepoužívá se", "Volitelný" or "Povinný", and whether participants may rent an SI card from the organiser. When creating an event in Klabis, the manager MUST choose the SI usage in the event form; the rental option is unticked by default. An event imported from ORIS requires an SI card and allows rental. The policy is not synchronised with ORIS. The policy can be changed while the event is DRAFT or ACTIVE, even when members are already registered; SI card numbers already recorded on registrations are kept.
+
+#### Scenario: Manager chooses the SI usage when creating an event
+
+- **WHEN** a user with EVENTS:MANAGE permission opens the form to create an event
+- **THEN** the form shows the SI usage choice "Nepoužívá se" / "Volitelný" / "Povinný" with nothing preselected
+- **AND** the "Půjčení čipu povoleno" tick box is unticked
+
+#### Scenario: Event cannot be created without choosing the SI usage
+
+- **WHEN** a manager submits the create event form without choosing the SI usage
+- **THEN** the form shows an error that the SI usage must be chosen
+- **AND** the event is not created
+
+#### Scenario: Event imported from ORIS requires an SI card and allows rental
+
+- **WHEN** an event is imported from ORIS
+- **THEN** the event requires an SI card on registration
+- **AND** SI card rental is allowed
+
+#### Scenario: Synchronisation with ORIS does not change the SI policy
+
+- **GIVEN** an ORIS-imported event whose SI policy the manager changed to "Volitelný"
+- **WHEN** the event is synchronised with ORIS afterwards
+- **THEN** the event keeps the SI policy "Volitelný"
+- **AND** no decision about a difference against ORIS is asked of anyone
+
+#### Scenario: Manager sets an event that does not use SI
+
+- **WHEN** a manager creates or edits an event and chooses "Nepoužívá se" for SI cards
+- **THEN** the event is saved with SI cards not used
+- **AND** the "Půjčení čipu povoleno" tick box is not offered
+
+#### Scenario: Manager allows SI card rental
+
+- **WHEN** a manager edits an event that uses SI cards and ticks "Půjčení čipu povoleno"
+- **THEN** the event is saved with SI card rental allowed
+
+#### Scenario: Coordinator changes the SI policy
+
+- **GIVEN** a DRAFT or ACTIVE event that lists the current user as a coordinator
+- **WHEN** the coordinator edits the event and changes the SI usage or the rental option
+- **THEN** the event is updated with the new SI policy
+- **AND** no EVENTS:MANAGE permission is required
+
+#### Scenario: Inline edit on the event detail page includes the SI policy
+
+- **WHEN** a manager or coordinator edits an event inline on the detail page
+- **THEN** the form shows the SI usage choice and the "Půjčení čipu povoleno" tick box reflecting the current settings
+
+#### Scenario: Changing the policy keeps recorded SI card numbers
+
+- **GIVEN** an ACTIVE event requiring SI cards with members already registered with their SI card numbers
+- **WHEN** a manager changes the SI usage to "Nepoužívá se"
+- **THEN** the event is updated without an error
+- **AND** the SI card numbers already recorded on the registrations are retained
+
+#### Scenario: SI policy cannot be changed on a finished or cancelled event
+
+- **WHEN** a user attempts to change the SI policy of a FINISHED or CANCELLED event
+- **THEN** the system shows an error that the event can no longer be modified
+
+#### Scenario: Event detail shows the SI policy
+
+- **WHEN** a member opens the detail page of an event
+- **THEN** the page shows whether the event requires, accepts or does not use an SI card
+- **AND** whether SI card rental is available

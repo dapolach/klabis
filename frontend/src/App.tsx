@@ -25,8 +25,9 @@ import {GroupsPage} from "./pages/groups/GroupsPage.tsx";
 import {GroupDetailPage} from "./pages/groups/GroupDetailPage.tsx";
 import {TrainingGroupsPage} from "./pages/training-groups/TrainingGroupsPage.tsx";
 import {TrainingGroupDetailPage} from "./pages/training-groups/TrainingGroupDetailPage.tsx";
-import {FamilyGroupsPage} from "./pages/family-groups/FamilyGroupsPage.tsx";
-import {FamilyGroupDetailPage} from "./pages/family-groups/FamilyGroupDetailPage.tsx";
+import {LegalGuardianDetailPage} from "./pages/legal-guardians/LegalGuardianDetailPage.tsx";
+import {LegalGuardianGroupsPage} from "./pages/legal-guardian-groups/LegalGuardianGroupsPage.tsx";
+import {LegalGuardianGroupDetailPage} from "./pages/legal-guardian-groups/LegalGuardianGroupDetailPage.tsx";
 import {CategoryPresetsPage} from "./pages/events/CategoryPresetsPage.tsx";
 import {EventTypesPage} from "./pages/events/EventTypesPage.tsx";
 import {MembershipFeesAdminPage} from "./pages/membership-fees/MembershipFeesAdminPage.tsx";
@@ -113,8 +114,9 @@ function App() {
                                     <Route path="/groups/:id" element={<GroupDetailPage/>}/>
                                     <Route path="/training-groups" element={<TrainingGroupsPage/>}/>
                                     <Route path="/training-groups/:id" element={<TrainingGroupDetailPage/>}/>
-                                    <Route path="/family-groups" element={<FamilyGroupsPage/>}/>
-                                    <Route path="/family-groups/:id" element={<FamilyGroupDetailPage/>}/>
+                                    <Route path="/legal-guardians/:id" element={<LegalGuardianDetailPage/>}/>
+                                    <Route path="/legal-guardian-groups" element={<LegalGuardianGroupsPage/>}/>
+                                    <Route path="/legal-guardian-groups/:id" element={<LegalGuardianGroupDetailPage/>}/>
                                     <Route path="/category-presets" element={<CategoryPresetsPage/>}/>
                                     <Route path="/event-types" element={<EventTypesPage/>}/>
                                     <Route path="/membership-fee-tiers" element={<MembershipFeesAdminPage/>}/>

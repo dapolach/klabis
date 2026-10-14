@@ -56,8 +56,13 @@ See root `CLAUDE.md` Quick Start section (`./runLocalEnvironment.sh`). Additiona
 - `spring.modulith.test.file-modification-detector=default` is configured as system property in `build.gradle.kts` — no
   need to pass it manually
 
-**Field-Level Authorization Pattern** — see `backend-patterns` skill for full details. Key gotchas:
-- `OwnershipResolver` is lazy-resolved from `ApplicationContext` — eager injection causes `No ServletContext set` startup error
+**Authorization** — see `backend-patterns` skill (`authorization.md`, `field-security.md`) and ADR-010. Key gotchas:
+- Every decision goes through `AuthorizationEvaluator` (permission snapshot carried by the authentication token); `AuthorizationArchitectureTest` (ArchUnit) fails the build when code outside `common.authorization`/`common.security` reads security annotations or `Authentication.getAuthorities()`
+- The permission snapshot is loaded lazily by `KlabisJwtAuthenticationToken` (memoized, once per token = once per request) through `AuthorizationSnapshotLoader`; the converter bean resolves the loader through an `ObjectProvider` because `@WebMvcTest` slices have no permission tables
+- Field rules are `@HasAuthority` / `@OwnerVisible` / `@TargetId` / `@ReadAuthority` only — SpEL `@PreAuthorize` on a field is not supported (on a method it still works over `getAuthorities()`)
+- `@WithKlabisMockUser(authorities = …, targetGrants = @TargetGrant(…))` builds a token with a fixed snapshot (`KlabisAuthenticationFactory.createAuthenticationToken(jwtParams, snapshot)`) — `@WebMvcTest`s need no permission tables; slice tests get the authorization beans from `KlabisWebMvcSliceConfiguration`
+- Denial texts come from `AuthorizationEvaluator.describeRequirement(...)` — never compose "Required authority …" from annotations in a caller
+- `HalFormsSupport.klabisAfford*`/`klabisLinkTo` fail fast when no `HalFormsSupport` bean is bound (the static instance is bound per test by `HalFormsSupportInstanceTestExecutionListener`); `@WebMvcTest` slices get it from `KlabisWebMvcSliceConfiguration`
 - Ownership tests require `@WithKlabisMockUser(memberId = "...")` — `@WithMockUser` creates plain token without `memberIdUuid`
 - Record component annotations with `@Target(METHOD)` propagate to accessor method per JLS §8.10.1
 
@@ -70,6 +75,12 @@ See root `CLAUDE.md` Quick Start section (`./runLocalEnvironment.sh`). Additiona
 **Gradle Optimization**
 - Build without `clean` is faster: `./gradlew build -x test` (vs `clean build -x test`)
 - Gradle writes to `build/` directory during execution — may block concurrent builds
+
+## Modules
+
+Spring Modulith application modules under `com.klabis.*`: `members`, `events`, `calendar`, `finance`, `oris` (ORIS integration), `authorizationserver`, `common` (shared kernel), and:
+
+- **`sync`** — generic bidirectional synchronisation engine (`com.klabis.sync`). Owns change detection, conflict handling, retry and audit for any entity paired against any external system; entirely unaware of ORIS or any other integration. The only adapter today is `OrisEventSyncAdapter` (`com.klabis.events.infrastructure.orissync`), which moves the existing ORIS event synchronisation behind the engine. It lives in the module that owns the entity, not in `com.klabis.oris` — see ADR-005 and openspec `relocate-oris-event-sync-adapter` for why. See `docs/design-decisions.md` ADR-005 and the `backend-patterns` skill (`references/synchronization-adapter.md`) for how to add another one.
 
 ## Documentation Index
 
@@ -88,7 +99,6 @@ See root `CLAUDE.md` Quick Start section (`./runLocalEnvironment.sh`). Additiona
 
 - **Always use `test-runner` agent to run tests** — never invoke Gradle test commands directly
 - Prefer running single tests and not the whole test suite - for performance
-- Use `developer:tdd-best-practices` skill for TDD workflow guidance
 
 ### Large Refactorings with OpenSpec
 
@@ -111,12 +121,22 @@ See `backend-patterns` skill for detailed patterns including type-safe IDs, Meme
 These are the Klabis-specific hooks on top of Spring Security / Spring Authorization Server. The mainline filter-chain / JWT theory lives in the Spring docs (see [docs/README.md](docs/README.md)).
 
 - **`KlabisAuthorizationServerCustomizer`** (`com.klabis.authorizationserver`) — Spring AS customizer that wires Klabis-specific behaviour into the authorization server chain (registered clients, token customizers).
-- **JWT custom claims** — access tokens carry `registrationNumber`, `memberIdUuid`, and the user's `authorities`. `Authority.isKnownAuthority()` filters out the `FACTOR_PASSWORD` authority that `DaoAuthenticationProvider` auto-adds for the MFA framework.
+- **JWT custom claims** — user access tokens carry `registrationNumber`, `memberIdUuid` and `user_id`, but no `authorities`: `KlabisJwtAuthenticationToken.getAuthorities()` reads them per request from the `AuthorizationSnapshot` (so permission changes apply without re-login; outside an HTTP request a user token grants nothing). `client_credentials` tokens keep scope-derived `authorities`. `Authority.isKnownAuthority()` filters out the `FACTOR_PASSWORD` authority that `DaoAuthenticationProvider` auto-adds for the MFA framework.
 - **`MemberIdToUuidConverter` + `CurrentUserArgumentResolver`** (`members.infrastructure.mvc`) — resolve `@CurrentUser Member` parameters in controllers from the JWT subject (`memberIdUuid` claim). See `backend-patterns` skill.
-- **`@HasAuthority(Authority.X)`** — type-safe alternative to `@PreAuthorize("hasAuthority('X:Y')")` for single-authority global checks. Method/class level. See `backend-patterns` skill.
-- **Field-level authorization** — `@OwnerVisible`, `@HasAuthority`, `JsonNullable<T>` on record components. See `backend-patterns` skill.
+- **`AuthorizationEvaluator`** (`common.authorization`) — the single place that answers authorization questions, over the `AuthorizationSnapshot` of the current authentication (loaded lazily, once per request, by the user token) (grants over everything from `PermissionService` + grants over specific targets from `RelationshipSource` beans). Used by method security, affordances, field security and application code (`has(authority)`, `has(authority, target)`, `isSelf(target)`). See ADR-010.
+- **`@HasAuthority({Authority.X, …})`** — any of the listed authorities; with a `@TargetId(TargetType.X)` parameter an authority may also be held over just that target. Generated from `x-klabis-authority` / `x-klabis-target-id` in the spec. See `backend-patterns` skill.
+- **Field-level authorization** — `@HasAuthority`, `@OwnerVisible`, `@TargetId`, `@ReadAuthority`, `JsonNullable<T>` on record components. See `backend-patterns` skill.
 - **`KlabisUserDetailsService`** (`com.klabis.authorizationserver`) — bridges `users` aggregate + `Authority` enum into Spring Security `UserDetails`.
 - **Custom `AuthenticationEntryPoint`** — validates the OAuth2 `redirect_uri` against `RegisteredClientRepository` before redirecting (prevents open-redirector).
+- **Event coordinator grants** — `EventCoordinatorRelationshipSource` (`events.infrastructure`) grants `EVENTS_EDIT` and `EVENTS_REGISTRATIONS_READ` (SPECIFIC, EVENT) over every event the user coordinates; operations list them beside `EVENTS_MANAGE` / `EVENTS_REGISTRATIONS`, and application code asks `AuthorizationEvaluator.isAllowed(…, TargetRef.event(id), false)`. Never on the wire, never assignable. Changing an event's coordinators is `EVENTS_MANAGE` only. See ADR-010.
+- **`Authority.SYNC_MANAGE`** (`SYNC:MANAGE`, held over everything only) — gates every `sync` module operation (`/api/{entityType}/{id}/sync…`): reading state, triggering a pass, acknowledging/resolving a conflict, resetting a terminally failed record.
+
+### Synchronisation Engine Configuration (`sync` module)
+
+`SyncProperties` (`com.klabis.sync.application`, `@ConfigurationProperties(prefix = "klabis.sync")`) — operational limits, all with coded defaults per `docs/design-decisions.md` ADR-005 / D19:
+
+- `max-attempts` (default `5`), `claim-lease` (`5m`), `history-retention` (`30d`), `retry-delay.initial`/`multiplier`/`max` (`15m` / `2` / `24h`) — configurable but not wired to env vars in `application.yml`; override via `klabis.sync.*` properties directly if needed.
+- `scan-cron` (nightly full pass, default `0 0 2 * * *`) and `due-scan-interval` (frequent due scan, default `15m`) — externalized via `KLABIS_SYNC_SCAN_CRON` / `KLABIS_SYNC_DUE_SCAN_INTERVAL` env vars in `application.yml`.
 
 ## Application Profiles
 
@@ -133,12 +153,13 @@ Feature-based profiles (composable independently):
 - **test-bootstrap** — test-only addition: activates `example-data` via profile group so tests can also bootstrap demo data (`@ActiveProfiles({"test", "test-bootstrap"})`)
 - **local-dev** — **local developer machines only**. Registers a second OAuth2 client `klabis-web-local` (confidential, `CLIENT_SECRET_POST`, PKCE required, `AUTHORIZATION_CODE` + `REFRESH_TOKEN` grants). This enables refresh-token-based silent token renewal when the frontend runs on `http://localhost:3000` (cross-origin from the backend on `:8443`). Spring AS refuses to issue refresh tokens to public clients, so this profile adds a confidential workaround client that stays out of production entirely. See `openspec/changes/enable-refresh-tokens-for-local-dev` for full rationale. **Never activate in any deployed environment.**
 - **pwa** — opt-in. Exposes `manifest.webmanifest` and `sw.js` so browsers offer the "Install" affordance and register the PWA service worker. Without this profile, `PwaDisabledController` returns 404 on those paths, hiding the install prompt and skipping SW registration. Off by default to avoid stale caches in dev/staging — enable explicitly on production.
-- **example-data** — seeds demo data (17 members incl. ZBM9000/ZBM9500, 4 training groups, 27 events, 3 membership fee tiers) via the profile-gated `BootstrapDataInitializer`s. Without it the database starts empty apart from always-bootstrapped data (admin user, OAuth2 clients, event types). Drop it to get a clean database, e.g. before synchronizing real data from ORIS.
+- **example-data** — seeds demo data (17 members incl. ZBM9000/ZBM9500, 4 training groups, 27 events, 3 membership fee tiers) via the profile-gated `BootstrapDataInitializer`s. Without it the database starts empty apart from always-bootstrapped data (admin user, OAuth2 clients, event types). The four initializers (`MembersDataBootstrap`, `TrainingGroupDataBootstrap`, `EventsDataBootstrap`, `MembershipFeeTiersDataBootstrap`) are gated `@Profile("example-data & !oris")`: **demo data stands down whenever `oris` is also active**, so ORIS-imported members never collide with sample registration numbers. Sample and ORIS-sourced data are alternatives, never both at once.
 
-Default active profiles: `h2,ssl,debug,metrics,oris,example-data` (zero-config local dev, HTTPS on 8443, H2 database with demo data)
-`runLocalEnvironment.sh` adds `local-dev` and `example-data` automatically, so developers get refresh-token-based silent renew and demo data out of the box.
+Default active profiles: `h2,ssl,debug,metrics,oris,example-data` (zero-config local dev, HTTPS on 8443, H2 database). Because `oris` and `example-data` are both active here, the `!oris` gate above means **this default profile set now yields an empty database** — no demo members, training groups, events or fee tiers. `runLocalEnvironment.sh` adds `local-dev` and `example-data` automatically, but does not drop `oris`, so the same applies there.
 
-Clean database (ORIS sync scenario): `SPRING_PROFILES_ACTIVE=h2,ssl,debug,metrics,oris ./gradlew bootRun`
+Getting demo data back: drop `oris` from the active profiles, e.g. `SPRING_PROFILES_ACTIVE=h2,ssl,debug,metrics,example-data ./gradlew bootRun`.
+
+Clean database (ORIS sync scenario): `SPRING_PROFILES_ACTIVE=h2,ssl,debug,metrics,oris ./gradlew bootRun` — equivalent to the default profile set minus `example-data`, since `oris` alone already suppresses demo data.
 
 Production example: `SPRING_PROFILES_ACTIVE=postgresql,ssl,email,metrics,pwa` (do NOT include `example-data` in deployed environments)
 
@@ -150,15 +171,15 @@ Production example: `SPRING_PROFILES_ACTIVE=postgresql,ssl,email,metrics,pwa` (d
 ## Key Technologies
 
 - **Java 21+**
-- **Spring Boot 4.0.5**
-- **Spring Modulith 2.0.0** - Event-driven modular application using hexagonal architecture
+- **Spring Boot 4.1.1**
+- **Spring Modulith 2.1.1** - Event-driven modular application using hexagonal architecture
 - **Spring Security 7** - OAuth2 Authorization Server + Resource Server
 - **Spring Data JDBC** - Lightweight JDBC-based persistence
 - **Spring HATEOAS** - HAL+FORMS hypermedia
 - **PostgreSQL** (prod) / H2 (dev/test)
 - **Flyway** - Database migrations
 - **Resilience4j** - Rate limiting
-- **Jasypt** - Encryption for GDPR data
+- **Spring Security Crypto** - `AesGcmBytesEncryptor` (AES-256-GCM) field encryption for GDPR data
 - **MapStruct** - DTO mapping
 - **Gradle** (Kotlin DSL) - Build tool
 - **JUnit 5** + **AssertJ** + **Mockito** - Testing

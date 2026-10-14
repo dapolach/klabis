@@ -1,14 +1,17 @@
 package com.klabis.members.infrastructure.restapi;
 
+import com.klabis.members.MembersWebMvcTest;
+import com.klabis.common.TargetGrant;
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
+import com.klabis.common.authorization.TargetType;
 import com.klabis.common.users.Authority;
 import com.klabis.members.MemberId;
 import com.klabis.members.MemberTestDataBuilder;
 import com.klabis.members.application.InvalidUpdateException;
 import com.klabis.members.application.ManagementPort;
 import com.klabis.members.application.MemberNotFoundException;
+import com.klabis.common.settings.OrisClubKeyManagementPort;
+import com.klabis.sync.application.SynchronizationPort;
 import com.klabis.members.domain.*;
 import com.klabis.members.domain.Gender;
 import com.klabis.members.domain.DrivingLicenseGroup;
@@ -16,12 +19,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.dao.OptimisticLockingFailureException;
-import org.springframework.data.web.PagedResourcesAssembler;
 import org.springframework.hateoas.MediaTypes;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.result.MockMvcResultHandlers;
 
@@ -61,22 +60,26 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * </ul>
  */
 @DisplayName("Update Member Controller API Tests")
-@WebMvcTest(controllers = MemberController.class)
-@Import(EncryptionConfiguration.class)
-@WithPostprocessors
+@MembersWebMvcTest
 class UpdateMemberApiTest {
 
     @Autowired
     private MockMvc mockMvc;
 
-    @MockitoBean
+    @Autowired
+    private com.klabis.members.application.MemberCompletenessPort memberCompletenessPort;
+
+    @Autowired
+    private com.klabis.members.legalguardiangroup.application.LegalGuardianGroupPort legalGuardianGroupPort;
+
+    @Autowired
     private ManagementPort memberService;
 
-    @MockitoBean
-    private MemberRepository memberRepository;
+    @Autowired
+    private OrisClubKeyManagementPort orisClubKeyManagementPort;
 
-    @MockitoBean
-    private PagedResourcesAssembler<?> pagedResourcesAssembler;
+    @Autowired
+    private SynchronizationPort synchronizationPort;
 
     private final UUID testMemberId = UUID.randomUUID();
 
@@ -86,10 +89,10 @@ class UpdateMemberApiTest {
                 .withFirstName("Jan")
                 .withLastName("Novak")
                 .withRegistrationNumber("ZBM1234")
+                .withDateOfBirth(LocalDate.of(1990, 1, 1))
                 .withEmail("jan.novak@example.com")
                 .withPhone("+420777123456")
                 .withAddress(Address.of("Hlavní 1", "Praha", "11000", "CZ"))
-                .withNoGuardian()
                 .build();
     }
 
@@ -464,12 +467,44 @@ class UpdateMemberApiTest {
         }
 
         @Nested
+        @DisplayName("Admin edit of a minor")
+        class AdminEditMinorTests {
+
+            @Test
+            @DisplayName("admin updating a minor should return 204")
+            @WithKlabisMockUser(authorities = {Authority.MEMBERS_MANAGE})
+            void shouldAllowAdminToUpdateMinor() throws Exception {
+                Member minor = MemberTestDataBuilder.aMember()
+                        .withId(testMemberId)
+                        .withDateOfBirth(LocalDate.now().minusYears(15))
+                        .build();
+                when(memberService.prefilledUpdateCommand(any(MemberId.class)))
+                        .thenReturn(Member.UpdateMember.from(minor));
+                when(memberService.updateMember(any(MemberId.class), any(Member.UpdateMember.class)))
+                        .thenReturn(minor);
+
+                mockMvc.perform(
+                                patch("/api/members/{id}", testMemberId)
+                                        .contentType("application/json")
+                                        .content("""
+                                                {
+                                                    "email": "new.email@example.com"
+                                                }
+                                                """)
+                        )
+                        .andExpect(status().isNoContent());
+            }
+        }
+
+        @Nested
         @DisplayName("Member self-edit")
         class MemberSelfEditTests {
 
             @Test
             @DisplayName("updating own email should return 204 No Content")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAllowMemberToUpdateOwnEmail() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))
@@ -497,8 +532,64 @@ class UpdateMemberApiTest {
             }
 
             @Test
-            @DisplayName("updating own phone should return 204 No Content")
+            @DisplayName("minor (who holds no EDIT_PROFILE over themself) updating own profile should return 403 and save nothing")
             @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            void shouldRejectMinorUpdatingOwnProfile() throws Exception {
+                UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                Member minor = MemberTestDataBuilder.aMember()
+                        .withId(currentMemberId)
+                        .withDateOfBirth(LocalDate.now().minusYears(15))
+                        .build();
+                when(memberService.prefilledUpdateCommand(any(MemberId.class)))
+                        .thenReturn(Member.UpdateMember.from(minor));
+
+                mockMvc.perform(
+                                patch("/api/members/{id}", currentMemberId)
+                                        .contentType("application/json")
+                                        .content("""
+                                                {
+                                                    "email": "my.new.email@example.com"
+                                                }
+                                                """)
+                        )
+                        .andExpect(status().isForbidden());
+
+                verify(memberService, never()).updateMember(any(MemberId.class), any(Member.UpdateMember.class));
+            }
+
+            @Test
+            @DisplayName("member who turned 18 today updating own profile should return 204")
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
+            void shouldAllowMemberTurned18TodayToUpdateOwnProfile() throws Exception {
+                UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                Member justAdult = MemberTestDataBuilder.aMember()
+                        .withId(currentMemberId)
+                        .withDateOfBirth(LocalDate.now().minusYears(18))
+                        .build();
+                when(memberService.prefilledUpdateCommand(any(MemberId.class)))
+                        .thenReturn(Member.UpdateMember.from(justAdult));
+                when(memberService.updateMember(eq(new MemberId(currentMemberId)), any(Member.UpdateMember.class)))
+                        .thenReturn(justAdult);
+
+                mockMvc.perform(
+                                patch("/api/members/{id}", currentMemberId)
+                                        .contentType("application/json")
+                                        .content("""
+                                                {
+                                                    "email": "my.new.email@example.com"
+                                                }
+                                                """)
+                        )
+                        .andExpect(status().isNoContent());
+            }
+
+            @Test
+            @DisplayName("updating own phone should return 204 No Content")
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAllowMemberToUpdateOwnPhone() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))
@@ -527,7 +618,9 @@ class UpdateMemberApiTest {
 
             @Test
             @DisplayName("updating own address should return 204 No Content")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAllowMemberToUpdateOwnAddress() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))
@@ -562,7 +655,9 @@ class UpdateMemberApiTest {
 
             @Test
             @DisplayName("updating dietary restrictions should return 204 No Content")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAllowMemberToUpdateDietaryRestrictions() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))
@@ -591,7 +686,9 @@ class UpdateMemberApiTest {
 
             @Test
             @DisplayName("sending null for optional string fields should return 204 No Content")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAcceptNullOptionalStringFieldsWhenSelfUpdate() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))
@@ -658,7 +755,9 @@ class UpdateMemberApiTest {
              */
             @Test
             @DisplayName("updating own gender should return 403 — it needs MEMBERS:MANAGE")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldRejectMemberUpdatingOwnGender() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
 
@@ -678,7 +777,9 @@ class UpdateMemberApiTest {
 
             @Test
             @DisplayName("updating own chipNumber should return 204 — it carries no authority")
-            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {})
+            @WithKlabisMockUser(memberId = "00000000-0000-0000-0000-000000000001", authorities = {},
+                    targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE, type = TargetType.MEMBER,
+                            ids = "00000000-0000-0000-0000-000000000001"))
             void shouldAllowMemberToUpdateOwnChipNumber() throws Exception {
                 UUID currentMemberId = UUID.fromString("00000000-0000-0000-0000-000000000001");
                 when(memberService.prefilledUpdateCommand(any(MemberId.class)))

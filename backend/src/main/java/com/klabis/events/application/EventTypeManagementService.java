@@ -1,32 +1,23 @@
 package com.klabis.events.application;
 
-import com.dpolach.api.orisclient.OrisApiClient;
-import com.dpolach.api.orisclient.dto.lov.DisciplineListEntry;
-import com.klabis.common.ui.HalFormsInlineOption;
+import com.klabis.events.DisciplineId;
 import com.klabis.events.EventTypeId;
 import com.klabis.events.domain.*;
 import org.jmolecules.ddd.annotation.Service;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Collections;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 
 @Service
 class EventTypeManagementService implements EventTypeManagementPort {
 
-    private static final Logger log = LoggerFactory.getLogger(EventTypeManagementService.class);
     private static final int MAX_AFFECTED_EVENTS_IN_ERROR = 5;
 
     private final EventTypeRepository eventTypeRepository;
-    private final Optional<OrisApiClient> orisApiClient;
 
-    EventTypeManagementService(EventTypeRepository eventTypeRepository, Optional<OrisApiClient> orisApiClient) {
+    EventTypeManagementService(EventTypeRepository eventTypeRepository) {
         this.eventTypeRepository = eventTypeRepository;
-        this.orisApiClient = orisApiClient;
     }
 
     @Transactional
@@ -35,7 +26,7 @@ class EventTypeManagementService implements EventTypeManagementPort {
         if (eventTypeRepository.existsByNameIgnoreCase(command.name())) {
             throw new EventTypeNameAlreadyExistsException(command.name());
         }
-        validateNoDisciplineIdConflict(command.orisDisciplineIds(), null);
+        validateNoDisciplineIdConflict(command.disciplineIds(), null);
         int nextSortOrder = eventTypeRepository.findMaxSortOrder() + 1;
         EventType eventType = EventType.create(command, nextSortOrder);
         return eventTypeRepository.save(eventType);
@@ -52,17 +43,17 @@ class EventTypeManagementService implements EventTypeManagementPort {
             throw new EventTypeNameAlreadyExistsException(command.name());
         }
 
-        validateNoDisciplineIdConflict(command.orisDisciplineIds(), eventType);
+        validateNoDisciplineIdConflict(command.disciplineIds(), eventType);
         eventType.update(command);
         eventTypeRepository.save(eventType);
     }
 
-    private void validateNoDisciplineIdConflict(Set<Integer> disciplineIds, EventType ownerOrNull) {
+    private void validateNoDisciplineIdConflict(Set<DisciplineId> disciplineIds, EventType ownerOrNull) {
         if (disciplineIds == null || disciplineIds.isEmpty()) {
             return;
         }
-        for (int disciplineId : disciplineIds) {
-            eventTypeRepository.findByOrisDisciplineId(disciplineId).ifPresent(existing -> {
+        for (DisciplineId disciplineId : disciplineIds) {
+            eventTypeRepository.findByDisciplineId(disciplineId).ifPresent(existing -> {
                 if (ownerOrNull == null || !existing.getId().equals(ownerOrNull.getId())) {
                     throw new OrisDisciplineAlreadyMappedException(disciplineId);
                 }
@@ -97,29 +88,4 @@ class EventTypeManagementService implements EventTypeManagementPort {
         return eventTypeRepository.findAllSorted();
     }
 
-    @Transactional(readOnly = true)
-    @Override
-    public List<HalFormsInlineOption> listDisciplineOptions() {
-        if (orisApiClient.isEmpty()) {
-            return Collections.emptyList();
-        }
-        try {
-            return orisApiClient.get().listDisciplines().payload()
-                    .map(disciplines -> disciplines.values().stream()
-                            .sorted(java.util.Comparator.comparingInt(e -> Integer.parseInt(e.id())))
-                            .map(EventTypeManagementService::toInlineOption)
-                            .toList())
-                    .orElse(Collections.emptyList());
-        } catch (RuntimeException e) {
-            log.warn("ORIS discipline list unavailable, returning empty options", e);
-            return Collections.emptyList();
-        }
-    }
-
-    private static HalFormsInlineOption toInlineOption(DisciplineListEntry entry) {
-        String prompt = (entry.descriptionCZ() != null && !entry.descriptionCZ().isBlank())
-                ? entry.descriptionCZ()
-                : entry.name();
-        return new HalFormsInlineOption(entry.id(), prompt);
-    }
 }

@@ -60,8 +60,18 @@ public @interface WithKlabisMockUser {
     String userId()    default "";   // pokud chybí, vygeneruje se random
     String memberId()  default "";   // pokud chybí, uživatel nemá Member profil
     String username()  default "";   // pro Authentication.getName()
-    Authority[] authorities() default {};
+    Authority[] authorities() default {};      // oprávnění nad vším
+    TargetGrant[] targetGrants() default {};   // oprávnění nad konkrétními cíli
 }</code></pre>
+
+<p>
+    Anotace vyrobí <code>KlabisJwtAuthenticationToken</code>, který nese pevný <code>AuthorizationSnapshot</code> (kap. 06), takže
+    <code>@WebMvcTest</code> nepotřebuje tabulky oprávnění. Slice testy importují společnou
+    <code>KlabisWebMvcSliceConfiguration</code> (hodiny, šifrování, <code>HalFormsSupport</code>, <code>AuthorizationEvaluator</code>,
+    <code>AuthorizationSnapshotProvider</code>); token ručně v testu vyrobíte přes
+    <code>KlabisAuthenticationFactory.createAuthenticationToken(jwtParams, snapshot)</code>;
+    ručně sestavené komponenty v unit testech dostanou <code>SecurityContextAuthorizationEvaluator.create()</code>.
+</p>
 
 <pre class="signature"><code>@Test
 @WithKlabisMockUser(authorities = {Authority.MEMBERS_MANAGE})
@@ -69,7 +79,12 @@ void admin_can_update_any_member() { ... }
 
 @Test
 @WithKlabisMockUser(memberId = OWNER_ID_STRING)
-void owner_can_see_own_birth_number() { ... }</code></pre>
+void owner_can_see_own_birth_number() { ... }
+
+@Test
+@WithKlabisMockUser(targetGrants = @TargetGrant(authority = Authority.MEMBERS_EDIT_PROFILE,
+        type = TargetType.MEMBER, ids = {CHILD_ID_STRING}))
+void delegate_acts_only_for_that_member() { ... }</code></pre>
 
 <aside class="note warn">
     Pokud má <code>memberId</code> hodnotu a <code>userId</code> chybí, použije se stejná hodnota i
@@ -202,7 +217,6 @@ void memento_roundtrip_preserves_state() {
 <pre class="signature"><code>@WebMvcTest(MemberController.class)
 class MemberControllerTest {
     @MockitoBean UserService userService;
-    @MockitoBean OwnershipResolver ownershipResolver;   // pokud testujete @OwnerVisible
     // …
 }</code></pre>
 
@@ -210,7 +224,6 @@ class MemberControllerTest {
 <ul>
     <li><code>docs/testing-pyramid.md</code> — kompletní pyramida včetně rozhodovacího stromu.</li>
     <li><code>backend-patterns/references/testing-guide.md</code> — vzory specifické pro Klabis do hloubky.</li>
-    <li>Skill <code>developer:tdd-best-practices</code> — TDD workflow.</li>
 </ul>
 
 </article>

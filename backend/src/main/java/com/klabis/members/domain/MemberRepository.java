@@ -5,6 +5,7 @@ import org.jmolecules.architecture.hexagonal.Port;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
+import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -44,6 +45,11 @@ public interface MemberRepository {
      */
     Optional<Member> findByEmail(String email);
 
+    /**
+     * Members may share an e-mail (a child and a parent), so uniqueness checks need every match.
+     */
+    List<Member> findAllByEmail(String email);
+
     List<Member> findAll();
 
     List<Member> findAll(MemberFilter filter);
@@ -61,6 +67,12 @@ public interface MemberRepository {
     int countByBirthYear(int birthYear);
 
     List<Member> findAllByIds(Collection<MemberId> ids);
+
+    /**
+     * Lightweight lookup for callers that only need the age (authorization runs it on every request), so
+     * they do not load a whole aggregate.
+     */
+    Optional<LocalDate> findDateOfBirth(MemberId id);
 
     boolean existsAny();
 

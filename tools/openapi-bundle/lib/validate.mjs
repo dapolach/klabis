@@ -1,7 +1,7 @@
 import {readFileSync} from 'node:fs';
 
 import {HTTP_METHODS, sortKeysDeep} from './bundle.mjs';
-import {forEachHalResponse, halResponsePayloadNames, isEnvelopeShaped} from './derive.mjs';
+import {forEachHalResponse, halResponsePayloadNames, isEnvelopeShaped, schemaName} from './derive.mjs';
 
 /**
  * Validation of Klabis-specific OpenAPI extensions.
@@ -12,16 +12,37 @@ import {forEachHalResponse, halResponsePayloadNames, isEnvelopeShaped} from './d
  */
 
 export const KNOWN_KLABIS_EXTENSIONS = new Set([
-    'x-klabis-owner-id',
+    'x-klabis-target-id',
     'x-klabis-owner-visible',
     'x-klabis-authority',
+    'x-klabis-read-authority',
     'x-klabis-halforms-access',
     'x-klabis-not-blank',
     'x-klabis-past',
     'x-klabis-url',
     'x-klabis-class-constraint',
     'x-klabis-relation',
+    'x-klabis-nullable',
     'x-klabis-hal',
+]);
+
+/**
+ * The `x-hal-*` directive family the deriver consumes or validates. The `x-klabis-*` loop rejects
+ * unknown keys by prefix; without the mirror-image set here, a typo like `x-hal-inputtype` would be
+ * silently ignored by every consumer — the deriver reads its directives by exact name — and ship as
+ * a no-op. Value and placement rules for the known keys live in their own blocks below.
+ */
+/** Extensions that existed once; a dedicated message beats "Unknown extension" for a migration slip. */
+const REMOVED_KLABIS_EXTENSIONS = new Map([
+    ['x-klabis-owner-id', 'was replaced by "x-klabis-target-id: <TYPE>"'],
+]);
+
+export const KNOWN_HAL_EXTENSIONS = new Set([
+    'x-hal-entity-items',
+    'x-hal-embedded',
+    'x-hal-input-type',
+    'x-hal-links',
+    'x-hal-templates',
 ]);
 
 export const HALFORMS_ACCESS_VALUES = new Set(['READ_ONLY', 'NONE', 'READ_WRITE', 'DEFAULT']);
@@ -46,17 +67,39 @@ const PROPERTY_ONLY_CONSTRAINT_EXTENSIONS = new Set([
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /**
- * Extracts authority enum constant names from Authority.java.
- *
- * Authority is an enum whose constants look like:
- *     MEMBERS_MANAGE("MEMBERS:MANAGE", Scope.CONTEXT_SPECIFIC),
+ * A hand-written HalForms annotation inside `x-field-extra-annotation`. The specs write the value
+ * without the leading `@` (it is rendered after one by pojo.mustache), so the qualified
+ * `com.klabis.common.ui.HalForms(...)` spelling is the one that occurs in practice; the `@`-prefixed
+ * and unqualified spellings are accepted too. The leading character class keeps this from matching
+ * an annotation whose simple name merely contains "HalForms".
+ */
+const HALFORMS_EXTRA_ANNOTATION = /(^|[^A-Za-z0-9_$])@?([\w$]+\.)*HalForms\s*\(/;
+
+/**
+ * Whether a node sits anywhere inside an `oneOf`/`allOf` composition. The walk appends array
+ * indices in brackets (`allOf[0]`), so both separators after the keyword count.
+ */
+const IN_COMPOSITION_PATH = /\/(oneOf|allOf)(\/|\[)/;
+
+/**
+ * Extracts the authority enum constants from Authority.java, with what each one declares about its
+ * target:
+ *     MEMBERS_MANAGE("MEMBERS:MANAGE", TargetType.MEMBER, GrantForm.ALL),
+ * yields `MEMBERS_MANAGE -> {targetType: 'MEMBER', grantForms: Set{'ALL'}}`.
  * The trailing `public static final String *_SCOPE` constants are deliberately NOT authorities
  * and must not be accepted.
  */
 export function parseAuthorities(authorityJavaSource) {
     const body = authorityJavaSource.slice(authorityJavaSource.indexOf('public enum Authority'));
     const enumBody = body.slice(0, body.indexOf(';'));
-    return new Set([...enumBody.matchAll(/^\s*([A-Z][A-Z0-9_]*)\s*\(/gm)].map((m) => m[1]));
+    const authorities = new Map();
+    for (const [, name, args] of enumBody.matchAll(/^\s*([A-Z][A-Z0-9_]*)\s*\(([^)]*)\)/gm)) {
+        authorities.set(name, {
+            targetType: args.match(/TargetType\.([A-Z_]+)/)?.[1],
+            grantForms: new Set([...args.matchAll(/GrantForm\.([A-Z_]+)/g)].map((m) => m[1])),
+        });
+    }
+    return authorities;
 }
 
 export function loadAuthorities(authorityJavaPath) {
@@ -73,6 +116,106 @@ function resolveParameter(document, param) {
     const match = param.$ref.match(/^#\/components\/parameters\/(.+)$/);
     if (!match) return param;
     return document.components?.parameters?.[match[1]];
+}
+
+/** The operation's parameters carrying `x-klabis-target-id`, with shared `$ref` parameters resolved. */
+function targetIdParameters(document, operation) {
+    const params = Array.isArray(operation.parameters) ? operation.parameters : [];
+    return params
+        .map((p) => resolveParameter(document, p))
+        .filter((p) => typeof p?.['x-klabis-target-id'] === 'string');
+}
+
+/**
+ * What an operation's `x-klabis-authority` / `x-klabis-owner-visible` demand of its parameters,
+ * stated once per operation: both are evaluated against the operation's single target, which only
+ * a path parameter marked `x-klabis-target-id` can name. Authorities held over `{ALL}` only are
+ * target-agnostic and ask for nothing.
+ *
+ * One error for a wrong parameter count however many reasons demand it; the target type is checked
+ * per authority, since each may name a different one.
+ */
+function operationTargetErrors(document, operation, path, authorities) {
+    const reasons = [];
+    const expectedTypes = new Set();
+    const specificAuthorities = [];
+
+    const names = authorityNames(operation['x-klabis-authority']) ?? [];
+    for (const name of names.filter((n) => authorities.get(n)?.grantForms.has('SPECIFIC'))) {
+        const {targetType} = authorities.get(name);
+        specificAuthorities.push({name, targetType});
+        expectedTypes.add(targetType);
+        reasons.push(`"${name}" may be held over specific ${targetType} targets`);
+    }
+    if (operation['x-klabis-owner-visible'] === true) {
+        reasons.push('x-klabis-owner-visible resolves ownership against the target');
+    }
+    if (reasons.length === 0) return [];
+
+    const targetParams = targetIdParameters(document, operation);
+    if (targetParams.length !== 1) {
+        const type = expectedTypes.size > 0 ? `: ${[...expectedTypes].join(', ')}` : '';
+        return [{
+            path,
+            message: `${reasons.join('; ')}, so the operation needs exactly one parameter marked `
+                + `x-klabis-target-id${type} (found ${targetParams.length})`,
+        }];
+    }
+
+    const actualType = targetParams[0]['x-klabis-target-id'];
+    return specificAuthorities
+        .filter(({targetType}) => actualType !== targetType)
+        .map(({name, targetType}) => ({
+            path,
+            message: `"${name}" is about ${targetType} targets but parameter `
+                + `"${targetParams[0].name}" is marked x-klabis-target-id: ${actualType}`,
+        }));
+}
+
+/** Authority names named by an `x-klabis-authority` / `x-klabis-read-authority` value, or null if malformed. */
+function authorityNames(value) {
+    if (typeof value === 'string') return [value];
+    if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === 'string')) return value;
+    return null;
+}
+
+/**
+ * Names of the component schemas a request body can carry, directly or through nested `$ref`s.
+ * `x-klabis-read-authority` is emitted as `@ReadAuthority` on a record component and only means
+ * something for a HAL-FORMS template, which is built from a request body.
+ */
+function requestSchemaNames(document) {
+    const schemas = document?.components?.schemas ?? {};
+    const requestBodies = document?.components?.requestBodies ?? {};
+    const reached = new Set();
+
+    const visitSchema = (node) => {
+        if (Array.isArray(node)) return node.forEach(visitSchema);
+        if (!isPlainObject(node)) return;
+        const name = schemaName(node);
+        if (name !== undefined && !reached.has(name)) {
+            reached.add(name);
+            visitSchema(schemas[name]);
+        }
+        for (const [key, value] of Object.entries(node)) {
+            if (key !== '$ref') visitSchema(value);
+        }
+    };
+
+    const visitRequestBody = (body) => {
+        const resolved = typeof body?.$ref === 'string'
+            ? requestBodies[body.$ref.split('/').pop()]
+            : body;
+        for (const media of Object.values(resolved?.content ?? {})) visitSchema(media?.schema);
+    };
+
+    for (const pathItem of Object.values(document.paths ?? {})) {
+        if (!isPlainObject(pathItem)) continue;
+        for (const [method, operation] of Object.entries(pathItem)) {
+            if (HTTP_METHODS.includes(method) && isPlainObject(operation)) visitRequestBody(operation.requestBody);
+        }
+    }
+    return reached;
 }
 
 /** Collects every operationId present in the document, with the operations declaring it. */
@@ -202,11 +345,23 @@ export function validateSpec(document, {authorities}) {
     errors.push(...envelopedPayloadErrors(document));
     errors.push(...missingEnvelopeBaseErrors(document));
 
+    const targetTypes = new Set([...authorities.values()].map((a) => a.targetType));
+    targetTypes.delete('NONE');
+    targetTypes.delete(undefined);
+    const requestSchemas = requestSchemaNames(document);
+
     walk(document, '', (node, path, context) => {
         if (!isPlainObject(node)) return;
 
+        if (context === 'operation') errors.push(...operationTargetErrors(document, node, path, authorities));
+
         for (const [key, value] of Object.entries(node)) {
             if (!key.startsWith('x-klabis-')) continue;
+
+            if (REMOVED_KLABIS_EXTENSIONS.has(key)) {
+                errors.push({path: `${path}/${key}`, message: `"${key}" ${REMOVED_KLABIS_EXTENSIONS.get(key)}`});
+                continue;
+            }
 
             if (!KNOWN_KLABIS_EXTENSIONS.has(key)) {
                 errors.push({
@@ -217,7 +372,7 @@ export function validateSpec(document, {authorities}) {
             }
 
             // x-klabis-authority (-> method-level @HasAuthority), x-klabis-owner-visible
-            // (-> paired @OwnerVisible/@OwnerId, see below) and x-klabis-hal (-> the deriver's
+            // (-> @OwnerVisible, paired with a @TargetId parameter, see below) and x-klabis-hal (-> the deriver's
             // opt-out) make sense directly on an operation. The others describe field-level access
             // on a schema property and have no meaning without a property to attach to.
             if (context === 'operation' && !OPERATION_LEVEL_EXTENSIONS.has(key)) {
@@ -244,13 +399,50 @@ export function validateSpec(document, {authorities}) {
                 errors.push({path: `${path}/${key}`, message: 'must be false when present'});
             }
 
-            if (key === 'x-klabis-authority') {
-                if (typeof value !== 'string') {
-                    errors.push({path: `${path}/${key}`, message: 'must be a string'});
-                } else if (!authorities.has(value)) {
+            if (key === 'x-klabis-authority' || key === 'x-klabis-read-authority') {
+                const names = authorityNames(value);
+                if (names === null) {
+                    errors.push({path: `${path}/${key}`, message: 'must be an authority name or a non-empty list of them'});
+                } else {
+                    for (const name of names.filter((n) => !authorities.has(n))) {
+                        errors.push({
+                            path: `${path}/${key}`,
+                            message: `"${name}" is not a constant of Authority.java`,
+                        });
+                    }
+                }
+
+                // Request schemas only: a response has no form to render a field read-only in.
+                if (key === 'x-klabis-read-authority') {
+                    const pathSchemaName = path.match(/^\/components\/schemas\/([^/]+)/)?.[1];
+                    const inRequest = pathSchemaName === undefined
+                        ? /^\/(paths\/.*\/requestBody|components\/requestBodies)\//.test(path)
+                        : requestSchemas.has(pathSchemaName);
+                    if (!inRequest) {
+                        errors.push({
+                            path: `${path}/${key}`,
+                            message: '"x-klabis-read-authority" is only valid on a request schema property',
+                        });
+                    }
+                }
+            }
+
+            if (key === 'x-klabis-target-id') {
+                if (typeof value !== 'string' || !targetTypes.has(value)) {
                     errors.push({
                         path: `${path}/${key}`,
-                        message: `"${value}" is not a constant of Authority.java`,
+                        message: `"${value}" is not a target type; known: ${[...targetTypes].sort().join(', ')}`,
+                    });
+                }
+                // Only pathParams.mustache has a branch for the key. On a query or header
+                // parameter it would be silently dropped, leaving the target unnamed. This also
+                // covers page/size/sort: x-spring-paginated folds those into a single Pageable
+                // argument, and all three are query parameters.
+                if (typeof node.in === 'string' && node.in !== 'path') {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: `target-id parameter "${node.name}" is in "${node.in}"; `
+                            + '@TargetId is only generated for path parameters',
                     });
                 }
             }
@@ -260,10 +452,6 @@ export function validateSpec(document, {authorities}) {
                     path: `${path}/${key}`,
                     message: `"${value}" is not one of ${[...HALFORMS_ACCESS_VALUES].join(', ')}`,
                 });
-            }
-
-            if (key === 'x-klabis-owner-id' && value !== true) {
-                errors.push({path: `${path}/${key}`, message: 'must be true when present'});
             }
 
             // Rendered verbatim after a '@' at class level by pojo.mustache, so a value that is not
@@ -291,6 +479,76 @@ export function validateSpec(document, {authorities}) {
                 }
             }
 
+            // A directive reaching validation is an authoring mistake: consumePropertyDirectives
+            // consumes it exactly where the codegen honours it — a $ref property for `true`, a
+            // nullable type array for `false`, never beside or inside a composition, never on a
+            // required member, nowhere but a property — and leaves the rest for these checks, the
+            // same split that makes the x-hal-entity-items rules fire on misplaced markers only.
+            if (key === 'x-klabis-nullable') {
+                // The directive *replaces* composition (design.md D5): beside oneOf/allOf the
+                // deriver cannot act, and the composition would either strip the directive or
+                // double-declare nullability.
+                if (node.oneOf !== undefined || node.allOf !== undefined) {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: 'cannot be combined with oneOf/allOf — the directive replaces '
+                            + 'the composition; name the ref and let x-klabis-nullable '
+                            + 'declare the nullability',
+                    });
+                    continue;
+                }
+
+                if (value !== true && value !== false) {
+                    errors.push({path: `${path}/${key}`, message: 'must be a boolean'});
+                    continue;
+                }
+
+                if (value === true && Array.isArray(node.type) && node.type.includes('null')) {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: "redundant: the type array already declares 'null' — "
+                            + 'declare nullability once',
+                    });
+                    continue;
+                }
+
+                // A survivor from inside a composition subtree (e.g. on an allOf member): the
+                // codegen does not honour extensions there, so acting on the directive would
+                // change the frontend type while the generated Java stays bare.
+                if (IN_COMPOSITION_PATH.test(path)) {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: 'inside a oneOf/allOf composition — the codegen does not honour '
+                            + 'extensions there, so the directive would change only the '
+                            + 'frontend type; move the property out of the composition',
+                    });
+                    continue;
+                }
+
+                if (!path.includes('/properties/')) {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: 'is only honoured on a schema property',
+                    });
+                    continue;
+                }
+
+                if (value === true && typeof node.$ref !== 'string') {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: 'true is only defined on a $ref property — the derived bundle '
+                            + 'shape for it is oneOf: [<ref>, null]',
+                    });
+                } else if (value === false
+                    && !(Array.isArray(node.type) && node.type.includes('null'))) {
+                    errors.push({
+                        path: `${path}/${key}`,
+                        message: "false narrows a type array containing 'null', "
+                            + "but this property's type does not contain 'null'",
+                    });
+                }
+            }
+
             if (PROPERTY_ONLY_CONSTRAINT_EXTENSIONS.has(key)) {
                 if (value !== true) {
                     errors.push({path: `${path}/${key}`, message: 'must be true when present'});
@@ -309,46 +567,16 @@ export function validateSpec(document, {authorities}) {
             if (key === 'x-klabis-owner-visible' && value !== true) {
                 errors.push({path: `${path}/${key}`, message: 'must be true when present'});
             }
+        }
 
-            // @OwnerVisible without an @OwnerId parameter is the dangerous half of the pair:
-            // checkOwnership() finds no owner to compare against and denies, so the endpoint
-            // silently loses the owner-or-authority semantics it claims to have. The templates
-            // emit each annotation from its own node and cannot see the other, so this is the
-            // only thing keeping the two together.
-            if (key === 'x-klabis-owner-visible' && context === 'operation' && value === true) {
-                const params = Array.isArray(node.parameters) ? node.parameters : [];
-                const ownerIdParams = params
-                    .map((p) => resolveParameter(document, p))
-                    .filter((p) => p?.['x-klabis-owner-id'] === true);
-
-                if (ownerIdParams.length === 0) {
-                    errors.push({
-                        path: `${path}/${key}`,
-                        message: 'requires exactly one parameter marked x-klabis-owner-id: true — '
-                            + '@OwnerVisible without @OwnerId denies instead of resolving ownership',
-                    });
-                } else if (ownerIdParams.length > 1) {
-                    // findAnnotatedParameterIndex returns the first match, so a second one would
-                    // be silently ignored — and which parameter wins would depend on spec order.
-                    errors.push({
-                        path: `${path}/${key}`,
-                        message: `${ownerIdParams.length} parameters are marked x-klabis-owner-id; `
-                            + 'ownership resolves against exactly one',
-                    });
-                } else if (ownerIdParams[0].in !== 'path') {
-                    // Only pathParams.mustache has a branch for x-klabis-owner-id. On a query or
-                    // header parameter the key would be silently dropped, leaving @OwnerVisible
-                    // with nothing to resolve against — the exact failure this check exists to
-                    // prevent, just one step later. This also covers the page/size/sort case:
-                    // x-spring-paginated folds those into a single Pageable argument, dropping the
-                    // parameter the annotation was meant for, and all three are query parameters.
-                    errors.push({
-                        path: `${path}/${key}`,
-                        message: `owner-id parameter "${ownerIdParams[0].name}" is in `
-                            + `"${ownerIdParams[0].in}"; @OwnerId is only generated for path parameters`,
-                    });
-                }
-            }
+        // The x-hal-* mirror of the x-klabis-* allowlist above (see KNOWN_HAL_EXTENSIONS).
+        for (const key of Object.keys(node)) {
+            if (!key.startsWith('x-hal-') || KNOWN_HAL_EXTENSIONS.has(key)) continue;
+            errors.push({
+                path: `${path}/${key}`,
+                message: `Unknown extension "${key}". Known x-hal extensions: `
+                    + `${[...KNOWN_HAL_EXTENSIONS].sort().join(', ')}`,
+            });
         }
 
         // Restricted to `type: array` with a `$ref` items schema (Decision 3). A singular
@@ -379,13 +607,80 @@ export function validateSpec(document, {authorities}) {
                     message: 'requires the array\'s "items" to be a $ref to a payload schema',
                 });
             } else {
-                const match = node.items.$ref.match(/^#\/components\/schemas\/(.+)$/);
-                const target = match ? document.components?.schemas?.[match[1]] : undefined;
+                const itemsName = schemaName(node.items);
+                const target = itemsName ? document.components?.schemas?.[itemsName] : undefined;
                 if (isEnvelopeShaped(target)) {
                     errors.push({
                         path: `${path}/x-hal-entity-items`,
-                        message: `"${match[1]}" is already shaped as a HAL envelope — `
+                        message: `"${itemsName}" is already shaped as a HAL envelope — `
                             + 'the marker would wrap it a second time',
+                    });
+                }
+            }
+        }
+
+        // `x-hal-input-type` names the HAL-FORMS input type the property's single @HalForms
+        // annotation carries (assembled by KlabisSpringCodegen.postProcessModelProperty, rendered
+        // by pojo.mustache). A codegen directive, meaningless to the frontend — the authoring rules
+        // (oneOf/allOf conflict, @HalForms inside x-field-extra-annotation) arrive together with
+        // derive.mjs consuming and stripping it like x-hal-entity-items.
+        if (Object.hasOwn(node, 'x-hal-input-type')) {
+            const value = node['x-hal-input-type'];
+            if (typeof value !== 'string' || value === '') {
+                errors.push({path: `${path}/x-hal-input-type`, message: 'must be a non-empty string'});
+            }
+            // Same replacement rule as x-klabis-nullable: the assembled annotation is a property
+            // concern, and oneOf/allOf would strip the extension — beside or inside a composition
+            // the input type would be silently lost. consumePropertyDirectives leaves the marker
+            // in place in exactly those spots for this check.
+            if (node.oneOf !== undefined || node.allOf !== undefined
+                || IN_COMPOSITION_PATH.test(path)) {
+                errors.push({
+                    path: `${path}/x-hal-input-type`,
+                    message: 'cannot be combined with oneOf/allOf — the composition strips the '
+                        + 'extension, so the input type would be silently lost',
+                });
+            }
+            // pojo.mustache renders schema properties only: on a bare schema, a parameter or an
+            // operation the generator never assembles the annotation.
+            if (!path.includes('/properties/')) {
+                errors.push({
+                    path: `${path}/x-hal-input-type`,
+                    message: 'is only honoured on a schema property',
+                });
+            }
+        }
+
+        // The single @HalForms annotation is assembled by KlabisSpringCodegen from
+        // x-klabis-halforms-access / x-hal-input-type. @HalForms is not @Repeatable, so a
+        // hand-written one alongside it would not compile — the input type belongs in
+        // x-hal-input-type, not here.
+        if (Object.hasOwn(node, 'x-field-extra-annotation')) {
+            const value = node['x-field-extra-annotation'];
+            if (typeof value === 'string' && HALFORMS_EXTRA_ANNOTATION.test(value)) {
+                errors.push({
+                    path: `${path}/x-field-extra-annotation`,
+                    message: 'carries a @HalForms annotation — declare the input type with '
+                        + 'x-hal-input-type (and access with x-klabis-halforms-access); a second '
+                        + '@HalForms on the property does not compile',
+                });
+            }
+        }
+
+        // A required member has no "absent" state, so the tri-state wrapper contradicts required —
+        // and the stock AbstractJavaCodegen adds the JsonNullable import only for a non-required
+        // property, making required + x-klabis-nullable: true a compile error far from the spec.
+        // The deriver leaves the directive on a required member unconsumed so this check can see
+        // it (see consumePropertyDirectives); false is fine there, it removes a wrapper.
+        if (Array.isArray(node.required) && isPlainObject(node.properties)) {
+            for (const name of node.required) {
+                if (typeof name !== 'string') continue;
+                if (node.properties[name]?.['x-klabis-nullable'] === true) {
+                    errors.push({
+                        path: `${path}/properties/${name}/x-klabis-nullable`,
+                        message: 'on a required property — the generated JsonNullable<T> would '
+                            + 'miss its import, and required contradicts the tri-state; drop the '
+                            + 'directive or the required entry',
                     });
                 }
             }

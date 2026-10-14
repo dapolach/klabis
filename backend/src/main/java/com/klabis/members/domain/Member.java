@@ -18,8 +18,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Member aggregate root.
@@ -29,9 +31,8 @@ import java.util.Objects;
  * <p>
  * Business invariants:
  * - Registration number must be unique
- * - At least one email and one phone required (member OR guardian)
  * - Rodne cislo only allowed for Czech nationality
- * - Guardian required for minors (<18 years)
+ * - Completeness of contacts and legal guardians is derived by {@link MemberCompleteness}
  */
 @AggregateRoot
 public class Member extends KlabisAggregateRoot<Member, MemberId> {
@@ -45,7 +46,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
     private Address address;
     private EmailAddress email;
     private PhoneNumber phone;
-    private GuardianInformation guardian;
     private boolean active;
     private String chipNumber;
     private IdentityCard identityCard;
@@ -56,6 +56,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
     private String dietaryRestrictions;
     private BirthNumber birthNumber;
     private BankAccountNumber bankAccountNumber;
+    private boolean dataIncomplete;
 
     // Suspension fields
     private DeactivationReason suspensionReason;
@@ -79,7 +80,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             Address address,
             EmailAddress email,
             PhoneNumber phone,
-            GuardianInformation guardian,
             BirthNumber birthNumber,
             BankAccountNumber bankAccountNumber,
             UserId registeredBy
@@ -92,7 +92,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                     member.address,
                     member.email,
                     member.phone,
-                    member.guardian,
                     member.birthNumber,
                     member.bankAccountNumber,
                     null
@@ -127,7 +126,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             TrainerLicense trainerLicense,
             RefereeLicense refereeLicense,
             String dietaryRestrictions,
-            GuardianInformation guardian,
             String firstName,
             String lastName,
             LocalDate dateOfBirth,
@@ -155,7 +153,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                     member.trainerLicense,
                     member.refereeLicense,
                     member.dietaryRestrictions,
-                    member.guardian,
                     pi != null ? pi.getFirstName() : null,
                     pi != null ? pi.getLastName() : null,
                     pi != null ? pi.getDateOfBirth() : null,
@@ -198,6 +195,38 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         }
     }
 
+    /**
+     * Command carrying an inward write from ORIS synchronisation.
+     * <p>
+     * Carries exactly the fields ORIS owns — see design.md D2/D3. Licences, bank account,
+     * dietary requirements and the suspension block are not expressible here, so a synchronisation
+     * cannot touch them even by mistake. Each field is written unconditionally by
+     * {@link #syncFromOris(SyncFromOris)}, including when it is {@code null}: protecting a
+     * Klabis-entered value against an empty ORIS field is the synchronisation engine's job, decided
+     * before this method is ever reached, not this method's.
+     * <p>
+     * {@code registrationNumber} is not applied — {@link Member#registrationNumber} is set only at
+     * construction — but is checked against the target aggregate as a guard against the caller
+     * having resolved the wrong member. {@code nationality} is a validated {@link Nationality}
+     * rather than the raw code {@link UpdateMember} still takes, since the ORIS projection this
+     * command is built from has already produced one.
+     */
+    @RecordBuilder
+    public record SyncFromOris(
+            RegistrationNumber registrationNumber,
+            String firstName,
+            String lastName,
+            LocalDate dateOfBirth,
+            Gender gender,
+            Nationality nationality,
+            BirthNumber birthNumber,
+            EmailAddress email,
+            PhoneNumber phone,
+            Address address,
+            String chipNumber
+    ) {
+    }
+
     // ========== Constructors ==========
 
     private Member(
@@ -207,7 +236,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             Address address,
             EmailAddress email,
             PhoneNumber phone,
-            GuardianInformation guardian,
             boolean active,
             String chipNumber,
             IdentityCard identityCard,
@@ -218,6 +246,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             String dietaryRestrictions,
             BirthNumber birthNumber,
             BankAccountNumber bankAccountNumber,
+            boolean dataIncomplete,
             DeactivationReason suspensionReason,
             Instant suspendedAt,
             String suspensionNote,
@@ -229,7 +258,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         this.address = address;
         this.email = email;
         this.phone = phone;
-        this.guardian = guardian;
         this.active = active;
         this.chipNumber = chipNumber;
         this.identityCard = identityCard;
@@ -240,6 +268,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         this.dietaryRestrictions = dietaryRestrictions;
         this.birthNumber = birthNumber;
         this.bankAccountNumber = bankAccountNumber;
+        this.dataIncomplete = dataIncomplete;
         this.suspensionReason = suspensionReason;
         this.suspendedAt = suspendedAt;
         this.suspensionNote = suspensionNote;
@@ -262,7 +291,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
      * @param address             member's address
      * @param email               member's email address
      * @param phone               member's phone number
-     * @param guardian            guardian information (may be null)
      * @param active              whether the member is active
      * @param chipNumber          member's chip number (may be null)
      * @param identityCard        member's identity card (may be null)
@@ -272,6 +300,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
      * @param dietaryRestrictions member's dietary restrictions (may be null)
      * @param birthNumber         member's birth number (may be null)
      * @param bankAccountNumber   member's bank account number (may be null)
+     * @param dataIncomplete      materialised completeness flag as of the member's last save
      * @param suspensionReason    reason for suspension (may be null)
      * @param suspendedAt         timestamp of suspension (may be null)
      * @param suspensionNote      optional suspension note (may be null)
@@ -285,7 +314,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             Address address,
             EmailAddress email,
             PhoneNumber phone,
-            GuardianInformation guardian,
             boolean active,
             String chipNumber,
             IdentityCard identityCard,
@@ -296,6 +324,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             String dietaryRestrictions,
             BirthNumber birthNumber,
             BankAccountNumber bankAccountNumber,
+            boolean dataIncomplete,
             DeactivationReason suspensionReason,
             Instant suspendedAt,
             String suspensionNote,
@@ -309,7 +338,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                 address,
                 email,
                 phone,
-                guardian,
                 active,
                 chipNumber,
                 identityCard,
@@ -320,6 +348,7 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                 dietaryRestrictions,
                 birthNumber,
                 bankAccountNumber,
+                dataIncomplete,
                 suspensionReason,
                 suspendedAt,
                 suspensionNote,
@@ -330,22 +359,64 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         return member;
     }
 
+    /**
+     * Registers a hand-filled member, which must be complete (design.md D5). Contacts and legal guardians of
+     * a minor are not known yet at this point - they are set on the legal guardian group afterwards - so for
+     * a minor the e-mail, telephone and guardian requirements are the caller's to enforce, while an adult's
+     * own contacts are enforced here.
+     */
     public static Member register(RegisterMember command) {
-        // Validate required fields
+        return register(command, null);
+    }
+
+    /**
+     * Registers a hand-filled member together with the contacts of the legal guardians that are being set at
+     * the same time, so the registration enforces every completeness rule, including a minor's guardian.
+     */
+    public static Member register(RegisterMember command, GuardianContacts guardians) {
+        validateStructure(command);
+
+        // Consistency rule: always enforced, regardless of completeness
+        validateBirthNumberConsistency(command.personalInformation().getNationalityCode(), command.birthNumber());
+
+        Set<MissingDataItem> missing = MemberCompleteness.missingData(command.email(), command.phone(),
+                command.personalInformation(), command.birthNumber(), command.address(),
+                guardians != null ? guardians : GuardianContacts.NONE);
+        if (guardians == null && command.personalInformation().isMinor()) {
+            missing.removeAll(Set.of(MissingDataItem.EMAIL, MissingDataItem.PHONE, MissingDataItem.GUARDIAN));
+        }
+        enforceCompleteness(missing);
+
+        return buildFrom(command, guardians != null ? guardians : GuardianContacts.NONE);
+    }
+
+    /**
+     * Registers a member whose data comes from ORIS rather than a hand-filled form (design.md
+     * D5), used only by {@code RegistrationPort.importMember}. Unlike {@link #register}, no
+     * completeness rule is enforced here: ORIS never holds a legal guardian and often lacks contact
+     * details, and the goal is to bring every current club member in regardless. The consistency
+     * rule — a birth number is never accepted for a non-Czech national — still holds, since it is
+     * not about completeness but about a value that would otherwise be simply wrong.
+     */
+    public static Member importFromOris(RegisterMember command) {
+        validateStructure(command);
+
+        // Consistency rule: always enforced, even when completeness is not (design.md D5)
+        validateBirthNumberConsistency(command.personalInformation().getNationalityCode(), command.birthNumber());
+
+        return buildFrom(command, GuardianContacts.NONE);
+    }
+
+    private static void validateStructure(RegisterMember command) {
         Assert.notNull(command.id(), "Member ID is required");
         Assert.notNull(command.registrationNumber(), "Registration number is required");
         Assert.notNull(command.personalInformation(), "Personal information is required");
-        Assert.notNull(command.address(), "Address is required");
+        // Address is no longer required here: an ORIS import may bring a member in without one
+        // (design.md D5/ADDRESS), and register() enforces it separately through
+        // enforceCompleteness so the exception type/message a hand registration sees is unchanged.
+    }
 
-        // Validate contact information
-        validateContactInformation(command.email(), command.phone(), command.guardian());
-
-        // Validate guardian for minors
-        validateGuardianForMinors(command.personalInformation(), command.guardian());
-
-        // Validate birth number nationality
-        validateBirthNumberNationality(command.personalInformation().getNationalityCode(), command.birthNumber());
-
+    private static Member buildFrom(RegisterMember command, GuardianContacts guardians) {
         Member member = new Member(
                 command.id(),
                 command.registrationNumber(),
@@ -353,7 +424,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                 command.address(),
                 command.email(),
                 command.phone(),
-                command.guardian(),
                 true, // new members are active by default
                 null, // chipNumber
                 null, // identityCard
@@ -364,6 +434,8 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
                 null, // dietaryRestrictions
                 command.birthNumber(),
                 command.bankAccountNumber(),
+                !MemberCompleteness.missingData(command.email(), command.phone(), command.personalInformation(),
+                        command.birthNumber(), command.address(), guardians).isEmpty(),
                 null, // suspensionReason
                 null, // suspendedAt
                 null, // suspensionNote
@@ -380,64 +452,17 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         return member;
     }
 
-    private static void validateContactInformation(
-            EmailAddress email,
-            PhoneNumber phone,
-            GuardianInformation guardian) {
-
-        boolean memberHasEmail = email != null;
-        boolean memberHasPhone = phone != null;
-
-        // GuardianInformation enforces non-null email and phone in its constructor
-        // Therefore, if guardian is present, it always has both email and phone
-        boolean guardianHasEmail = guardian != null; // guardian.getEmail() never null
-        boolean guardianHasPhone = guardian != null; // guardian.getPhone() never null
-
-        boolean hasEmail = memberHasEmail || guardianHasEmail;
-        boolean hasPhone = memberHasPhone || guardianHasPhone;
-
-        Assert.isTrue(hasEmail, "At least one email address is required (member or guardian)");
-        Assert.isTrue(hasPhone, "At least one phone number is required (member or guardian)");
-    }
-
     /**
-     * Validates that a guardian is provided for minor members.
-     *
-     * <p><b>Business Rule:</b> Guardian contact information is required when
-     * creating or updating a Member who is a minor (under 18) at the time of
-     * the operation. The age is calculated dynamically based on the current date.
-     *
-     * <p>Once a guardian is assigned, that relationship is permanent and does not
-     * expire when the member turns 18 later.
-     *
-     * @param dateOfBirth the member's date of birth
-     * @param guardian    the guardian information (may be null for adults)
-     * @throws IllegalArgumentException if member is under 18 and no guardian is provided
-     */
-    private static void validateGuardianForMinors(
-            PersonalInformation personalInformation,
-            GuardianInformation guardian) {
-
-        if (personalInformation.isMinor() && guardian == null) {
-            throw new BusinessRuleViolationException(
-                    "Guardian is required for minors (under 18 years)"
-            ) {
-            };
-        }
-    }
-
-    /**
-     * Validates birth number and nationality consistency.
-     *
-     * <p><b>Business Rule:</b> Birth number (rodné číslo) is required for Czech nationals
-     * and forbidden for non-Czech nationals.
+     * Validates birth number/nationality consistency: a birth number is forbidden for non-Czech
+     * nationals. This rule always holds, independent of completeness (design.md D3/D5) — unlike
+     * the requirement that a Czech national *have* a birth number, which is a completeness rule
+     * (see {@link MissingDataItem#BIRTH_NUMBER}).
      *
      * @param nationalityCode the member's nationality code (ISO 3166-1)
      * @param birthNumber     the birth number to validate (may be null)
-     * @throws BusinessRuleViolationException if birth number is provided for non-Czech nationality
-     *                                        or missing for Czech nationality
+     * @throws BusinessRuleViolationException if a birth number is provided for a non-Czech national
      */
-    private static void validateBirthNumberNationality(String nationalityCode, BirthNumber birthNumber) {
+    private static void validateBirthNumberConsistency(String nationalityCode, BirthNumber birthNumber) {
         Nationality nationality = Nationality.of(nationalityCode);
 
         if (birthNumber != null && !nationality.isCzech()) {
@@ -446,8 +471,70 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
             ) {
             };
         }
+    }
 
-        if (birthNumber == null && nationality.isCzech()) {
+    /**
+     * Stores whether the member is incomplete, so the member list and its filter can read it without loading
+     * legal guardians. The value is only as fresh as the member's last save.
+     */
+    public void recordMissingData(Set<MissingDataItem> missing) {
+        this.dataIncomplete = !missing.isEmpty();
+    }
+
+    public boolean isDataIncomplete() {
+        return dataIncomplete;
+    }
+
+    /**
+     * Enforces full completeness (design.md D5) — used by {@link #register(RegisterMember)}, where
+     * every missing item is a violation. Exception types and messages match the pre-completeness
+     * validation methods this replaced, so the registration form's behaviour is unchanged.
+     */
+    private static void enforceCompleteness(Set<MissingDataItem> missing) {
+        if (missing.contains(MissingDataItem.GUARDIAN)) {
+            throw new BusinessRuleViolationException(
+                    "Guardian is required for minors (under 18 years)"
+            ) {
+            };
+        }
+        Assert.isTrue(!missing.contains(MissingDataItem.EMAIL),
+                "At least one email address is required (member or guardian)");
+        Assert.isTrue(!missing.contains(MissingDataItem.PHONE),
+                "At least one phone number is required (member or guardian)");
+        Assert.isTrue(!missing.contains(MissingDataItem.ADDRESS), "Address is required");
+
+        if (missing.contains(MissingDataItem.BIRTH_NUMBER)) {
+            throw new BusinessRuleViolationException(
+                    "Birth number is required for Czech nationals"
+            ) {
+            };
+        }
+    }
+
+    /**
+     * Enforces the never-worsen rule (design.md D5) — used by {@link #update(UpdateMember)}. Only
+     * an item that becomes missing as a result of the edit is a violation; an item that was already
+     * missing before the edit may remain missing (an incomplete member may be saved with unrelated
+     * changes, or with only some missing items filled in).
+     */
+    private static void enforceNeverWorsen(Set<MissingDataItem> before, Set<MissingDataItem> after,
+                                           boolean becameMinor) {
+        if (after.contains(MissingDataItem.EMAIL) && !before.contains(MissingDataItem.EMAIL)) {
+            throw new IllegalArgumentException("At least one email address is required (member or guardian)");
+        }
+        if (after.contains(MissingDataItem.PHONE) && !before.contains(MissingDataItem.PHONE)) {
+            throw new IllegalArgumentException("At least one phone number is required (member or guardian)");
+        }
+        if (after.contains(MissingDataItem.ADDRESS) && !before.contains(MissingDataItem.ADDRESS)) {
+            throw new IllegalArgumentException("Address is required");
+        }
+        if (!becameMinor && after.contains(MissingDataItem.GUARDIAN) && !before.contains(MissingDataItem.GUARDIAN)) {
+            throw new BusinessRuleViolationException(
+                    "Guardian is required for minors (under 18 years)"
+            ) {
+            };
+        }
+        if (after.contains(MissingDataItem.BIRTH_NUMBER) && !before.contains(MissingDataItem.BIRTH_NUMBER)) {
             throw new BusinessRuleViolationException(
                     "Birth number is required for Czech nationals"
             ) {
@@ -504,10 +591,6 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
 
     public PhoneNumber getPhone() {
         return phone;
-    }
-
-    public GuardianInformation getGuardian() {
-        return guardian;
     }
 
     public boolean isActive() {
@@ -573,29 +656,32 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
      * only mean to touch some fields pass {@link UpdateMember#from(Member)} as the baseline and
      * overlay just those — a field left at its baseline value round-trips to the same value here.
      */
-    public void update(UpdateMember command) {
-        GuardianInformation newGuardian = command.guardian();
-
-        validateContactInformation(command.email(), command.phone(), newGuardian);
-
+    public void update(UpdateMember command, GuardianContacts guardians) {
         PersonalInformation newPersonalInfo = PersonalInformation.of(
                 command.firstName(), command.lastName(), command.dateOfBirth(),
                 command.nationality(), command.gender());
 
-        validateGuardianForMinors(newPersonalInfo, newGuardian);
-
         BirthNumber newBirthNumber = command.birthNumber();
-        if (newBirthNumber != null && !Nationality.of(newPersonalInfo.getNationalityCode()).isCzech()) {
+        if (newBirthNumber != null && !newPersonalInfo.getNationality().isCzech()) {
             newBirthNumber = null;
         }
-        validateBirthNumberNationality(newPersonalInfo.getNationalityCode(), newBirthNumber);
+        // Consistency rule: always enforced, regardless of completeness
+        validateBirthNumberConsistency(newPersonalInfo.getNationalityCode(), newBirthNumber);
+
+        // Never-worsen rule: an edit may only fill in missing data, never add to it (design.md D5). The one
+        // exception is a corrected date of birth turning an adult into a minor, who then lacks a guardian.
+        Set<MissingDataItem> missingBefore = MemberCompleteness.missingData(this, guardians);
+        Set<MissingDataItem> missingAfter = MemberCompleteness.missingData(command.email(), command.phone(),
+                newPersonalInfo, newBirthNumber, command.address(), guardians);
+        boolean becameMinor = !personalInformation.isMinor() && newPersonalInfo.isMinor();
+        enforceNeverWorsen(missingBefore, missingAfter, becameMinor);
+        recordMissingData(missingAfter);
 
         BirthNumber previousBirthNumber = this.birthNumber;
 
         this.email = command.email();
         this.phone = command.phone();
         this.address = command.address();
-        this.guardian = newGuardian;
         this.personalInformation = newPersonalInfo;
         this.birthNumber = newBirthNumber;
         this.chipNumber = command.chipNumber();
@@ -610,6 +696,41 @@ public class Member extends KlabisAggregateRoot<Member, MemberId> {
         if (command.updatedBy() != null && !Objects.equals(this.birthNumber, previousBirthNumber)) {
             registerEvent(BirthNumberAccessedEvent.modified(command.updatedBy(), this.id));
         }
+    }
+
+    /**
+     * Applies an inward write from ORIS synchronisation, overwriting every ORIS-owned field.
+     * <p>
+     * Distinct from {@link #update(UpdateMember)} on purpose (design.md D3): a synchronisation has
+     * no {@link UserId} to attribute a birth-number access to, so this method does not publish
+     * {@link BirthNumberAccessedEvent} even when the birth number changes. It also cannot touch
+     * licences, bank account, dietary requirements or the suspension block — those fields
+     * are simply absent from {@link SyncFromOris}. Whether ORIS's field-by-field merge protection
+     * has already run is decided by the caller before this method is invoked.
+     *
+     * @param command sync command with all ORIS-sourced fields
+     */
+    public void syncFromOris(SyncFromOris command) {
+        Assert.isTrue(Objects.equals(this.registrationNumber, command.registrationNumber()),
+                "SyncFromOris command targets a different member");
+
+        PersonalInformation newPersonalInfo = PersonalInformation.of(
+                command.firstName(), command.lastName(), command.dateOfBirth(),
+                command.nationality() != null ? command.nationality().code() : null,
+                command.gender());
+
+        // Completeness rules are dropped for ORIS-owned fields (design.md D5): ORIS is the
+        // authority, so a synchronisation may leave the member incomplete rather than being
+        // refused or holding on to a stale value. Only the consistency rule survives — a birth
+        // number is never accepted for a non-Czech national.
+        validateBirthNumberConsistency(newPersonalInfo.getNationalityCode(), command.birthNumber());
+
+        this.personalInformation = newPersonalInfo;
+        this.birthNumber = command.birthNumber();
+        this.email = command.email();
+        this.phone = command.phone();
+        this.address = command.address();
+        this.chipNumber = command.chipNumber();
     }
 
     /**

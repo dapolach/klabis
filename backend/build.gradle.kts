@@ -10,9 +10,9 @@ buildscript {
 
 plugins {
     java
-    id("org.springframework.boot") version "4.0.5"
+    id("org.springframework.boot") version "4.1.1"
     id("io.spring.dependency-management") version "1.1.7"
-    id("net.bytebuddy.byte-buddy-gradle-plugin") version "1.18.4"
+    id("net.bytebuddy.byte-buddy-gradle-plugin") version "1.18.14"
     id("org.springdoc.openapi-gradle-plugin") version "1.9.0"
     jacoco
 }
@@ -28,6 +28,9 @@ java {
 
 repositories {
     mavenCentral()
+    flatDir {
+        dirs("lib")
+    }
     maven {
         url = uri("https://gitlab.polach.cloud/api/v4/groups/zbm/-/packages/maven")
         name = "gitlab-zbm"
@@ -46,11 +49,14 @@ repositories {
 val mapstructVersion = "1.6.3"
 val mapstructSpringExtensionsVersion = "2.0.0"
 val testcontainersVersion = "1.19.3"
-val springModulithVersion = "2.0.0"
+val springModulithVersion = "2.1.1"
+val h2Version = "2.5.250"
+
+extra["h2.version"] = h2Version
 
 dependencyManagement {
     imports {
-        mavenBom("org.springframework.cloud:spring-cloud-dependencies:2025.1.1")
+        mavenBom("org.springframework.cloud:spring-cloud-dependencies:2025.1.3")
         mavenBom("org.jmolecules:jmolecules-bom:2025.0.2")
     }
 }
@@ -71,7 +77,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-oauth2-authorization-server")
 
     // ORIS API client
-    implementation("com.dpolach.api:oris-client:0db715d9-SNAPSHOT")
+    implementation("org.springframework.boot:spring-boot-starter-restclient")
+    implementation("com.dpolach.api:oris-client:0.2.2")
 
     // Spring Modulith
     implementation("org.springframework.modulith:spring-modulith-starter-core:$springModulithVersion")
@@ -84,7 +91,6 @@ dependencies {
     runtimeOnly("com.h2database:h2")
 
     // Flyway for database migrations
-    runtimeOnly("javax.xml.bind:jaxb-api:2.3.1")
     implementation("org.springframework.boot:spring-boot-starter-flyway")
 
     // Lombok (annotation processor - must be before MapStruct)
@@ -108,13 +114,10 @@ dependencies {
 
     // RecordBuilder for type-safe record builders
     compileOnly("io.soabase.record-builder:record-builder-core:44")
-    annotationProcessor("io.soabase.record-builder:record-builder-processor:44")
-
-    // Jasypt for encryption (GDPR - rodne cislo)
-    implementation("com.github.ulisesbocchio:jasypt-spring-boot-starter:3.0.5")
+    annotationProcessor("io.soabase.record-builder:record-builder-processor:53")
 
     // SpringDoc OpenAPI (Swagger)
-    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.2")
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.1")
 
     // Spring Cloud Resilience4j for rate limiting
     implementation("org.springframework.cloud:spring-cloud-starter-circuitbreaker-resilience4j")
@@ -123,15 +126,15 @@ dependencies {
     implementation("com.github.ben-manes.caffeine:caffeine")
 
     // Apache Commons Validator for IBAN validation
-    implementation("commons-validator:commons-validator:1.7")
+    implementation("commons-validator:commons-validator:1.11.0")
 
     // Apache Commons CSV for accommodation list CSV export
-    implementation("org.apache.commons:commons-csv:1.13.0")
+    implementation("org.apache.commons:commons-csv:1.14.1")
 
     // JsonNullable: tri-state (absent / null / value) wrapper for PATCH request bodies.
     // 0.2.10+ ships a Jackson 3 module (tools.jackson); the Jackson 2 artifacts it also declares
     // stay off the classpath because both are `provided` upstream.
-    implementation("org.openapitools:jackson-databind-nullable:0.2.11")
+    implementation("org.openapitools:jackson-databind-nullable:0.2.12")
 
     // jMolecules: DDD and hexagonal architecture annotations
     implementation("org.jmolecules:jmolecules-ddd")
@@ -148,10 +151,9 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.boot:spring-boot-starter-security-test")
-    testImplementation("io.rest-assured:rest-assured:5.5.0")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
-    testImplementation("org.testcontainers:testcontainers-postgresql:2.0.4")
-    testImplementation("org.testcontainers:testcontainers-junit-jupiter:2.0.4")
+    testImplementation("org.testcontainers:testcontainers-postgresql:2.0.5")
+    testImplementation("org.testcontainers:testcontainers-junit-jupiter:2.0.5")
     testImplementation("org.springframework.modulith:spring-modulith-starter-test:$springModulithVersion")
     testImplementation("org.springframework.modulith:spring-modulith-junit:$springModulithVersion")
     testImplementation("org.awaitility:awaitility")
@@ -171,6 +173,8 @@ byteBuddy {
 
 tasks.test {
     useJUnitPlatform()
+    // each fork has its own JVM and therefore its own in-memory H2, so forks do not share test data
+    maxParallelForks = (Runtime.getRuntime().availableProcessors() / 4).coerceIn(1, 4)
     systemProperty("spring.modulith.test.file-modification-detector", "default")
     systemProperty("spring.test.context.cache.maxSize", "60")
     val testTmpDir = layout.buildDirectory.dir("tmp/test").get().asFile
@@ -216,7 +220,7 @@ openApi {
     outputFileName.set("klabis-codefirst.json")
     waitTimeInSeconds.set(30)
     customBootRun {
-        args.set(listOf("--server.ssl.enabled=false", "--server.port=8080", "--jasypt.encryptor.password=something"))
+        args.set(listOf("--server.ssl.enabled=false", "--server.port=8080", "--klabis.encryption.password=something", "--klabis.encryption.salt=5c0744940b5c369b"))
     }
 }
 
@@ -309,7 +313,7 @@ openApiModule(
     module = "groups",
     pkg = "com.klabis.groups.infrastructure.restapi",
     specFile = "groups.yaml",
-    // The FamilyGroup/Group/TrainingGroup response payloads have array properties whose items each
+    // The LegalGuardianGroup/Group/TrainingGroup response payloads have array properties whose items each
     // carry their own _links (parents/members/owners/pendingInvitations/trainers). Those arrays are
     // marked x-hal-entity-items: true in groups.yaml; KlabisSpringCodegen.fromProperty reads the
     // marker and resolves them to List<EntityModel<X>>, so no per-schema schemaMappings are needed.
@@ -330,5 +334,12 @@ openApiModule(
     module = "oris",
     pkg = "com.klabis.oris",
     specFile = "oris.yaml",
+    mappings = emptyMap()
+)
+
+openApiModule(
+    module = "sync",
+    pkg = "com.klabis.sync.infrastructure.restapi",
+    specFile = "sync.yaml",
     mappings = emptyMap()
 )

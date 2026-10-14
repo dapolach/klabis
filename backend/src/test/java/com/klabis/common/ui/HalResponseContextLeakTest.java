@@ -1,13 +1,12 @@
 package com.klabis.common.ui;
 
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
+import com.klabis.common.CommonInfrastructureWebMvcSetup;
 import com.klabis.common.mvc.MvcComponent;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.hateoas.MediaTypes;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -27,9 +26,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code EntityModel} carrying that now-stale domain object.
  */
 @WebMvcTest(controllers = HalResponseContextLeakTest.LeakTestController.class)
-@Import(HalFormsSupport.class)
 @DisplayName("HalResponseContext leaking into an error response")
-@WithPostprocessors
+@CommonInfrastructureWebMvcSetup
 class HalResponseContextLeakTest {
 
     @Autowired

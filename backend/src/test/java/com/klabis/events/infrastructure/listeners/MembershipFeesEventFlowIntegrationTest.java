@@ -1,6 +1,7 @@
 package com.klabis.events.infrastructure.listeners;
 
 import com.klabis.CleanupTestData;
+import com.klabis.KlabisModuleTest;
 import com.klabis.TestApplicationConfiguration;
 import com.klabis.events.application.MemberRegistrationSanctionPort;
 import com.klabis.events.domain.MemberRegistrationBlockRepository;
@@ -12,16 +13,11 @@ import com.klabis.members.Members;
 import com.klabis.members.application.AllMembersPort;
 import com.klabis.membershipfees.MemberFeeSelectionResolvedEvent;
 import com.klabis.membershipfees.MemberMissedFeeSelectionEvent;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Import;
 import org.springframework.modulith.test.ApplicationModuleTest;
 import org.springframework.modulith.test.Scenario;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.util.UUID;
@@ -37,8 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>{@link MemberFeeSelectionResolvedEvent} → member registration block gets lifted</li>
  * </ul>
  */
-@ApplicationModuleTest(value = ApplicationModuleTest.BootstrapMode.STANDALONE, extraIncludes = "membershipfees")
-@ActiveProfiles("test")
+@KlabisModuleTest(mode = ApplicationModuleTest.BootstrapMode.ALL_DEPENDENCIES, extraIncludes = {"membershipfees", "sync"})
 @CleanupTestData
 @Import(TestApplicationConfiguration.class)
 @DisplayName("membership-fees → events cross-module event flow")

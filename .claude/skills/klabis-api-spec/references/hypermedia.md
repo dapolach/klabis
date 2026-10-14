@@ -166,8 +166,8 @@ outright in OpenAPI 3.0 and honoured inconsistently by 3.1 tooling, so each of
 `validate.mjs` restricts it to `type: array` with a `$ref` items schema; a singular HAL-wrapped
 property is refused until a real case appears.
 
-All 7 uses are in `groups.yaml` — the `parents`/`members`/`owners`/`pendingInvitations`/`trainers`
-collections of the three group responses, whose rows carry per-row affordances like
+All 7 uses are on the three group responses — `owners`/`members`/`pendingInvitations`/`trainers` in
+`groups.yaml`, family group `parents`/`members` in `members.yaml` — whose rows carry per-row affordances like
 `removeGroupOwner` and `cancelInvitation`.
 
 ## `x-hal-embedded` — a nested collection assembled at runtime
@@ -339,6 +339,45 @@ never carries and omitted the real one. Every `default` key was renamed to its o
 match that: **the key equals the `operation:` value** for the primary affordance just as for every
 other. If a `_templates.<name>` read on the frontend has no matching key in the generated `*Hal`,
 that is the spec being wrong, not the read.
+
+### The template property `type` — `x-hal-input-type`
+
+The backend types every HAL-FORMS template property with the Java class simple name
+(`HalFormsSupport.getTypeFromClass`), and the frontend field factory switches on that name — so a
+composite field whose component schema carries a different name than the factory knows renders an
+unknown-type warning instead of the field. `x-hal-input-type` (property-level, free-form string)
+overrides it:
+
+```yaml
+ranking:
+  $ref: '#/components/schemas/UpdateEventRankingRequest'
+  x-klabis-nullable: true
+  x-hal-input-type: RankingRequest     # template property carries type: "RankingRequest"
+```
+
+The codegen assembles it with `x-klabis-halforms-access` into a **single** `@HalForms(...)` on the
+record component — `@HalForms` is not `@Repeatable`, so two separate annotations would not compile.
+The deriver strips the key from the bundle like every codegen directive. Never spell it as
+`@HalForms(formInputType = ...)` inside `x-field-extra-annotation`: `validate.mjs` rejects that,
+and inside a composition it would be stripped anyway.
+
+#### Enum-backed properties
+
+Enum options arrive as bare values (`inline: ["MALE","FEMALE"]`); the frontend translates them in
+`localizeEnumOptions`, choosing the label group **by the property `type` only**
+(`ENUM_GROUP_BY_TYPE` in `useHalFormOptions.ts`). So every enum request property that the UI shows
+must pin its type:
+
+```yaml
+gender:
+  $ref: '#/components/schemas/Gender'
+  x-hal-input-type: Gender
+```
+
+Current set: `Gender`, `DrivingLicenseGroup`, `DeactivationReason`, `SyncResolution`, `Authority`.
+A new enum needs both the spec key and a mapping and labels group in the frontend. Values without a
+translation fall back to the raw value, so a missing mapping shows the enum constants rather than
+failing.
 
 ### What the frontend gets from them
 

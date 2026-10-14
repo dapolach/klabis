@@ -1,3 +1,9 @@
+export function czechPlural(count: number, one: string, few: string, many: string): string {
+    if (count === 1) return one;
+    if (count >= 2 && count <= 4) return few;
+    return many;
+}
+
 export const labels = {
     nav: {
         home: 'Domů',
@@ -6,9 +12,10 @@ export const labels = {
         members: 'Členové',
         groups: 'Skupiny',
         'training-groups': 'Tréninkové skupiny',
-        'family-groups': 'Rodinné skupiny',
+        legalGuardianGroups: 'Zákonní zástupci',
         'category-presets': 'Šablony kategorií',
         'event-types': 'Typy akcí',
+        disciplines: 'Disciplíny',
         account: 'Finance',
         'membership-fee-tiers': 'Katalog tierů',
         'fee-selection-campaigns': 'Kampaň volby členského příspěvku',
@@ -32,6 +39,7 @@ export const labels = {
         accommodationList: 'Seznam pro ubytování',
         savePermissions: 'Uložit oprávnění',
         sendRequest: 'Odeslat žádost',
+        activateAccount: 'Aktivovat účet',
         setPassword: 'Nastavit heslo a aktivovat účet',
         addItem: 'Přidat',
         removeItem: 'Odebrat',
@@ -44,18 +52,20 @@ export const labels = {
         cancelEvent: 'Zrušit akci',
         unregisterFromEvent: 'Odhlásit se z akce',
         editRegistration: 'Upravit přihlášku',
+        showRegistrationDetail: 'Detail',
         updateEvent: 'Upravit',
         registerForEvent: 'Přihlásit se',
         publishEvent: 'Publikovat',
         createEvent: 'Přidat akci',
         importEvent: 'Importovat z ORIS',
-        syncEventFromOris: 'Synchronizovat z ORISu',
         syncAllUpcomingFromOris: 'Synchronizovat všechny budoucí z ORIS',
         createCalendarItem: 'Přidat položku',
         suspendMember: 'Ukončit členství',
         resumeMember: 'Reaktivovat',
+        sendMemberAccountActivation: 'Založit účet',
         updateMember: 'Upravit profil',
         registerMember: 'Registrovat člena',
+        importFromOris: 'Synchronizovat s ORIS',
         createGroup: 'Vytvořit skupinu',
         updateGroup: 'Upravit název',
         deleteGroup: 'Smazat skupinu',
@@ -67,19 +77,19 @@ export const labels = {
         deleteTrainingGroup: 'Smazat tréninkovou skupinu',
         addTrainingGroupMember: 'Přidat člena',
         removeTrainingGroupMember: 'Odebrat',
-        createFamilyGroup: 'Vytvořit rodinnou skupinu',
         addOwner: 'Přidat správce',
         removeOwner: 'Odebrat správce',
         addGroupOwner: 'Přidat správce',
         removeGroupOwner: 'Odebrat správce',
+        removeGroupOwnerLeavesGroup: 'Odebráním správce dotčená osoba opustí skupinu.',
+        removeSelfAsOwnerLeavesGroup: 'Odebráním sebe ze správců opustíte skupinu.',
+        leaveGroup: 'Opustit skupinu',
+        leaveGroupConfirm: 'Opuštěním skupiny ztratíte členství ve skupině.',
         addTrainer: 'Přidat trenéra',
         removeTrainer: 'Odebrat trenéra',
-        addFamilyGroupParent: 'Přidat rodiče',
-        removeFamilyGroupParent: 'Odebrat rodiče',
-        addFamilyGroupChild: 'Přidat dítě',
-        removeFamilyGroupChild: 'Odebrat',
-        addFamilyGroupMember: 'Přidat člena',
-        deleteFamilyGroup: 'Smazat rodinnou skupinu',
+        setLegalGuardianGroupGuardians: 'Upravit zástupce',
+        setMemberLegalGuardians: 'Upravit zástupce',
+        updateLegalGuardian: 'Upravit profil',
         cancelInvitation: 'Zrušit pozvánku',
         createCategoryPreset: 'Přidat šablonu',
         updateCategoryPreset: 'Upravit šablonu',
@@ -103,6 +113,10 @@ export const labels = {
         closeCampaign: 'Uzavřít kampaň',
         editSnapshot: 'Upravit skupinu',
         assignMember: 'Přiřadit člena',
+        synchronizeNow: 'Synchronizovat',
+        acknowledgeSyncConflict: 'Potvrdit konflikt',
+        resolveSyncConflict: 'Vyřešit konflikt',
+        resetSyncRecord: 'Resetovat synchronizaci',
     },
 
     dialogTitles: {
@@ -112,12 +126,15 @@ export const labels = {
         registerForEvent: 'Přihlásit se na akci',
         unregisterFromEvent: 'Odhlásit se z akce',
         editRegistration: 'Upravit přihlášku',
+        registrationDetail: 'Detail přihlášky',
         suspendMember: 'Ukončení členství',
         resumeMember: 'Reaktivace člena',
+        sendMemberAccountActivation: 'Založení účtu',
         importEvent: 'Import akce z ORIS',
         syncAllUpcomingFromOris: 'Hromadná synchronizace z ORIS',
         createEvent: 'Nová akce',
         registerMember: 'Registrace nového člena',
+        importFromOris: 'Synchronizace členů s ORIS',
     },
 
     bulkSync: {
@@ -125,6 +142,29 @@ export const labels = {
         successCount: (n: number) => `${n} úspěšně synchronizováno`,
         failureCount: (n: number) => `${n} chyb`,
         failuresHeading: 'Chyby:',
+    },
+
+    sync: {
+        neverSynced: 'Nikdy synchronizováno',
+        overlayTitle: 'Synchronizace',
+        sectionLastSync: 'Poslední úspěšná synchronizace',
+        sectionManagerDetails: 'Detaily správy',
+        externalId: 'Externí ID',
+        direction: 'Směr',
+        directionInward: 'Do Klabisu',
+        directionOutward: 'Ven z Klabisu',
+        nextAttemptDueAt: 'Plánovaný další pokus',
+        failedAttemptsSinceLastSuccess: 'Počet neúspěšných pokusů',
+        divergenceHeading: 'Rozdílná pole',
+        divergenceField: 'Pole',
+        divergenceLocal: 'Lokální',
+        divergenceExternal: 'Externí',
+        divergenceBaseline: 'Výchozí',
+        divergenceSide: 'Změněno',
+        divergenceSideLocal: 'lokálně',
+        divergenceSideExternal: 'externě',
+        divergenceSideBoth: 'oboustranně',
+        actionsHeading: 'Akce',
     },
 
     orisImport: {
@@ -146,6 +186,9 @@ export const labels = {
     },
 
     fields: {
+        legalGuardians: 'Zákonní zástupci',
+        guardians: 'Zástupci',
+        legalGuardianUserId: 'Zákonný zástupce',
         coordinators: 'Vedoucí',
         eventDate: 'Datum konání',
         registrationDeadline: 'Uzávěrka',
@@ -159,6 +202,7 @@ export const labels = {
         organizer: 'Pořadatel',
         websiteUrl: 'Webová stránka',
         firstName: 'Jméno',
+        loginName: 'Přihlašovací číslo',
         lastName: 'Příjmení',
         email: 'E-mail',
         phone: 'Telefon',
@@ -174,19 +218,32 @@ export const labels = {
         drivingLicenseGroup: 'Řidičský průkaz',
         memberId: 'Člen',
         memberIds: 'Členové',
-        parentIds: 'Rodiče',
+        userId: 'Uživatel',
         trainerId: 'Trenér',
         minAge: 'Min. věk',
         maxAge: 'Max. věk',
         memberCount: 'Počet členů',
+        minorCount: 'Počet nezletilých',
         ageRange: 'Věkové rozmezí',
         reason: 'Důvod zrušení (volitelné)',
+        delegatedAuthorities: 'Oprávnění vlastníků nad členy',
         color: 'Barva',
         sortOrder: 'Pořadí',
         eventTypeId: 'Typ závodu',
-        orisDisciplineIds: 'ORIS disciplíny',
+        disciplineIds: 'ORIS disciplíny',
         ranking: 'Žebříček',
+        rankingLevelId: 'ID úrovně',
+        rankingName: 'Název žebříčku',
         baseEntryFee: 'Startovné',
+        sharedTransportEnabled: 'Nabídnout společnou dopravu',
+        sharedAccommodationEnabled: 'Nabídnout společné ubytování',
+        siUsage: 'Použití SI čipu',
+        siRentalAllowed: 'Půjčení čipu povoleno',
+        wantsToRentSi: 'Chci si půjčit čip',
+        wantsSharedTransport: 'Chci využít společnou dopravu',
+        wantsSharedAccommodation: 'Chci využít společné ubytování',
+        internalNote: 'Interní poznámka',
+        orisNote: 'Poznámka do ORIS',
         yearlyFeeAmount: 'Roční poplatek',
         yearlyFeeCurrency: 'Měna',
         tierIds: 'Tiery',
@@ -264,6 +321,16 @@ export const labels = {
             PRESTUP: 'Přestup',
             OTHER: 'Jiný důvod',
         },
+        resolution: {
+            INWARD: 'Převzít z externího systému',
+            OUTWARD: 'Zapsat do externího systému',
+            ACCEPT_DIVERGENCE: 'Ponechat obě verze',
+        },
+        siUsage: {
+            NOT_USED: 'Nepoužívá se',
+            OPTIONAL: 'Volitelný',
+            REQUIRED: 'Povinný',
+        },
         feeGroupStatus: {
             EDITABLE: 'Editovatelná',
             FROZEN: 'Zmrazená',
@@ -272,6 +339,21 @@ export const labels = {
             MEMBER_CHOICE: 'Vlastní volba',
             ADMIN_ASSIGNMENT: 'Přiřazeno adminem',
         },
+        syncStatus: {
+            NEW: 'Nový',
+            IN_SYNC: 'V synchronizaci',
+            RETRYING: 'Opakovaný pokus',
+            CONFLICT: 'Konflikt',
+            FAILED: 'Selhalo',
+            RETIRED: 'Ukončeno',
+        },
+        missingDataItem: {
+            EMAIL: 'e-mail',
+            PHONE: 'telefon',
+            BIRTH_NUMBER: 'rodné číslo',
+            GUARDIAN: 'zákonný zástupce',
+            ADDRESS: 'adresa',
+        }
     },
 
     validation: {
@@ -315,11 +397,6 @@ export const labels = {
         CR: 'ČR',
     } as Record<string, string>,
 
-    familyGroupRoles: {
-        parent: 'Rodič',
-        child: 'Dítě',
-    },
-
     ui: {
         hide: 'Skrýt',
         reveal: 'Zobrazit',
@@ -327,6 +404,10 @@ export const labels = {
         deadlineOrdinal: (n: number) => `${n}. termín:`,
         deadlineOrdinalShort: (n: number) => `${n}. termín`,
         notProvided: 'neuvedeno',
+        yes: 'Ano',
+        no: 'Ne',
+        sharedTransportCount: (count: number) => `Společná doprava: ${count} ${czechPlural(count, 'člen', 'členové', 'členů')}`,
+        sharedAccommodationCount: (count: number) => `Společné ubytování: ${count} ${czechPlural(count, 'člen', 'členové', 'členů')}`,
         form: 'Formulář',
         showRawJson: 'Zobrazit zdrojový JSON',
         completeJson: 'Úplná JSON data položky',
@@ -341,6 +422,18 @@ export const labels = {
         appVersion: 'Verze 1.0.0',
         showMemberDetails: 'Zobrazit detail člena',
         backToList: '← Zpět na seznam',
+        noLegalGuardianGroups: 'Zatím neexistuje žádná skupina zákonných zástupců.',
+        noMinorsInGroup: 'Skupina nemá žádné nezletilé.',
+        noLegalGuardians: 'Bez zákonného zástupce',
+        registrationMinorContactHint: 'Vlastní e-mail a telefon nezletilého jsou volitelné.',
+        registrationGuardiansRequiredHint: 'Nezletilý člen musí mít alespoň jednoho zákonného zástupce.',
+        registrationTakeoverHint: 'Pokud se dosavadní zákonný zástupce stává členem, vyberte ho; údaje se předvyplní z jeho profilu.',
+        legalGuardianPickExisting: 'Vybrat existujícího zástupce',
+        legalGuardianCreateNew: 'Založit nového zástupce',
+        optionSearch: 'Hledat podle jména',
+        clearSelection: 'Zrušit výběr',
+        selectOption: 'Vyberte možnost',
+        legalGuardianGroupMerged: 'Skupina byla sloučena s existující skupinou se stejnými zástupci.',
         switchToDark: 'Přepnout do tmavého režimu',
         switchToLight: 'Přepnout do světlého režimu',
         themeDark: 'Tmavý',
@@ -354,6 +447,8 @@ export const labels = {
         mySchedule: 'Můj rozvrh',
         emailSent: 'Email byl odeslán',
         emailSentDescription: 'Pokud je váš účet stále čekající na aktivaci, obdržíte email s odkazem pro nastavení hesla. Zkontrolujte prosím svou schránku.',
+        requestNewTokenTitle: 'Požádat o nový token',
+        requestNewTokenDescription: 'Zadejte své registrační číslo a email. Odkaz pro nastavení hesla přijde pouze tehdy, pokud zadaný email odpovídá emailu vedenému v Klabisu u vás nebo u vašeho zákonného zástupce.',
         passwordSetSuccess: 'Heslo úspěšně nastaveno',
         passwordSetSuccessDescription: 'Váš účet byl aktivován. Nyní budete přesměrováni na přihlašovací stránku.',
         permissionsDescription: 'Oprávnění určují, ke kterým funkcím aplikace má uživatel přístup. Změny se projeví okamžitě.',
@@ -382,6 +477,16 @@ export const labels = {
         dateOfBirth: 'Datum narození',
         address: 'Adresa',
         eventType: 'Typ',
+        sync: 'Synchronizace',
+    },
+
+    groupDelegation: {
+        ownersMayPrefix: 'Vlastníci skupiny (i budoucí) mohou:',
+        ownersGainNothing: 'Vlastníci skupiny nad členy nezískávají žádná oprávnění.',
+        invitationGrantsPrefix: 'Přijetím pozvánky získají vlastníci skupiny (současní i budoucí) nad vámi oprávnění:',
+        invitationGrantsNothing: 'Přijetím pozvánky nezískají vlastníci skupiny nad vámi žádná oprávnění.',
+        fixedAtCreation: 'Nelze měnit po vytvoření skupiny.',
+        noneDelegated: 'Žádná',
     },
 
     sections: {
@@ -392,14 +497,14 @@ export const labels = {
         eventInfo: 'INFORMACE O AKCI',
         registrations: 'Přihlášky',
         deadlines: 'UZÁVĚRKY PŘIHLÁŠEK',
-        eventCancelled: 'AKCE BYLA ZRUŠENA',
         accommodationList: 'Seznam pro ubytování',
+        sharedServices: 'SPOLEČNÉ SLUŽBY',
+        siPolicy: 'SI ČIPY',
         personalInfo: 'OSOBNÍ ÚDAJE',
         contact: 'KONTAKT',
         address: 'ADRESA',
         supplementary: 'DOPLŇKOVÉ INFORMACE',
         documentsAndLicenses: 'DOKLADY A LICENCE',
-        guardian: 'ZÁKONNÝ ZÁSTUPCE',
         deactivation: 'DEAKTIVACE',
         groups: 'Skupiny',
         groupsList: 'Moje skupiny',
@@ -410,12 +515,10 @@ export const labels = {
         trainingGroupMembers: 'ČLENOVÉ',
         trainingGroupTrainers: 'TRENÉŘI',
         trainingGroup: 'TRÉNINKOVÁ SKUPINA',
-        familyGroup: 'RODINNÁ SKUPINA',
-        familyGroups: 'Rodinné skupiny',
-        familyGroupsList: 'Rodinné skupiny',
-        familyGroupParents: 'RODIČE',
-        familyGroupChildren: 'DĚTI',
-        familyGroupMembers: 'ČLENOVÉ',
+        legalGuardianGroups: 'Zákonní zástupci',
+        legalGuardians: 'ZÁKONNÍ ZÁSTUPCI',
+        legalGuardianTakeover: 'PŘEVZETÍ ZÁKONNÉHO ZÁSTUPCE',
+        legalGuardianGroupMinors: 'NEZLETILÍ',
         categoryPresetsList: 'Šablony kategorií',
         presetsListHeading: 'Seznam šablon',
         eventTypesList: 'Typy akcí',
@@ -458,16 +561,39 @@ export const labels = {
     permissions: {
         'MEMBERS:MANAGE': {label: 'Správa členů', description: 'Registrace, úprava a mazání členů'},
         'MEMBERS:PERMISSIONS': {label: 'Správa oprávnění', description: 'Přidělování a odebírání oprávnění uživatelům'},
+        'MEMBERS:EDIT_PROFILE': {label: 'Úprava údajů člena', description: 'Zobrazení a úprava údajů konkrétního člena kromě údajů vyhrazených správě'},
         'EVENTS:MANAGE': {label: 'Správa akcí', description: 'Vytváření a úprava akcí'},
         'CALENDAR:MANAGE': {label: 'Správa kalendáře', description: 'Vytváření a úprava kalendářních událostí'},
         'GROUPS:TRAINING': {label: 'Správa tréninkových skupin', description: 'Umožňuje vytvářet a spravovat tréninkové skupiny a jejich členy.'},
         'EVENTS:REGISTRATIONS': {label: 'Správa přihlášek', description: 'Editace přihlášek ostatních členů na akce'},
         'FINANCE:MANAGE': {label: 'Správa financí', description: 'Vklady, strhávání a storno transakcí na účtech členů'},
+        'SYNC:MANAGE': {label: 'Správa synchronizace', description: 'Řešení konfliktů a řízení synchronizace s externími systémy'},
     },
 
     links: {
         trainingGroup: 'Tréninková skupina',
-        familyGroup: 'Rodina',
+        legalGuardians: 'Zákonní zástupci',
+    },
+
+    events: {
+        registrationModal: {
+            siChip: 'SI čip',
+            siChipHelperPrefilled: 'Předvyplněno z vašeho profilu · 4–8 číslic',
+            siChipHelper: '4–8 číslic',
+            siChipRequired: 'Zadejte SI čip',
+            siChipRequiredUnlessRenting: 'Zadejte SI čip, nebo zaškrtněte, že si čip chcete půjčit',
+            rentSi: 'Chci si půjčit čip',
+            siChipInvalidFormat: 'Zadejte 4–8 číslic',
+            category: 'Kategorie',
+            categoryRequired: 'Vyberte kategorii',
+            savedWithTemplate: (what: string) => `${what} — úspěšně uloženo`,
+            selectCategoryPlaceholder: 'Vyberte možnost',
+            deadlinePrefix: (date: string) => `Přihlášky do ${date}`,
+            confirmNew: 'Potvrdit přihlášku',
+            confirmEdit: 'Uložit změny',
+            prefillLoadError: 'Nepodařilo se načíst výchozí údaje přihlášky.',
+            noRegistrationAffordance: 'Formulář se nepodařilo načíst – přihlášky pravděpodobně nejsou otevřené.',
+        },
     },
 
     eventsFilter: {
@@ -495,6 +621,8 @@ export const labels = {
         statusInactive: 'Neaktivní',
         statusAll: 'Vše',
         emptyState: 'Žádní členové neodpovídají zadaným filtrům.',
+        incompleteOnly: 'Jen neúplní',
+        incompleteBadge: 'Neúplné údaje',
     },
 
     suspensionWarning: {
@@ -504,7 +632,7 @@ export const labels = {
         dissolveGroup: 'Rozpustit skupinu',
         trainingGroupNote: 'U tréninkové skupiny je nutné určit nástupce.',
         groupTypeTrainingGroup: 'Tréninková skupina',
-        groupTypeFamilyGroup: 'Rodinná skupina',
+        groupTypeLegalGuardianGroup: 'Skupina zákonných zástupců',
         groupTypeFreeGroup: 'Volná skupina',
     },
 
@@ -524,6 +652,14 @@ export const labels = {
         confirmPasswordLabel: 'Potvrzení nového hesla',
         submitButton: 'Změnit heslo',
         errorIncorrectCurrentPassword: 'Zadané aktuální heslo je nesprávné.',
+    },
+
+    accountActivation: {
+        confirm: 'Na vlastní e-mail člena bude odeslán aktivační odkaz, přes který si vytvoří přístup do aplikace.',
+        sent: 'Aktivační odkaz byl odeslán na e-mail člena.',
+    },
+    memberCompleteness: {
+        missingDataWarning: (items: string) => `Chybí: ${items}`,
     },
 
     memberFee: {
@@ -596,6 +732,10 @@ export function getDialogTitleLabel(templateName: string): string | undefined {
 export function getNavLabel(rel: string): string {
     const navLabels = labels.nav as Record<string, string>;
     return navLabels[rel] ?? rel;
+}
+
+export function getPermissionInfo(authority: string): { label: string; description: string } | undefined {
+    return (labels.permissions as Record<string, { label: string; description: string } | undefined>)[authority];
 }
 
 export function getEnumLabel(enumType: string, value: string): string {

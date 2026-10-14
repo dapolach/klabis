@@ -86,7 +86,7 @@ Why this works without an ordering conflict: Spring HATEOAS's own postprocessing
 
 **Context:**
 
-After the spec-first migration (ADR-002), every REST controller implements a generated `*Api` interface that carries `@RequestMapping`, `@RequestBody`, `@HasAuthority` and `@OwnerId`. Affordances, however, still recorded the **controller** method: `klabisAfford(methodOn(MemberController.class).updateMember(...))`.
+After the spec-first migration (ADR-002), every REST controller implements a generated `*Api` interface that carries `@RequestMapping`, `@RequestBody`, `@HasAuthority` and `@TargetId`. Affordances, however, still recorded the **controller** method: `klabisAfford(methodOn(MemberController.class).updateMember(...))`.
 
 `HalFormsSupport.modifyAffordanceForHalForms` walks the parameters of whatever method `methodOn(...)` recorded, looking for `@RequestBody`. Java does not inherit parameter annotations from an interface, so the lookup only succeeds when the override happens to repeat the annotation. When it does not, the method returns the affordance untouched and `HalFormsInputPayloadMetadata` never runs — the code that supplies inline `options`, `@HalForms(access = …)` and the `readOnly` flag.
 
@@ -111,7 +111,7 @@ Bean Validation forces the removal to be all-or-nothing. Hibernate Validator rej
 - A controller override can no longer silently drop HAL-FORMS input metadata; the annotation it would have to forget now lives somewhere it cannot forget it.
 - `HalFormsSupport.METHOD_AUTH_CACHE` is keyed on `Method` alone, sound only while callers derive `targetClass` from `method.getDeclaringClass()`. That class is now the interface rather than the controller — still self-derived, so the invariant holds, but the authorization outcome is asserted explicitly in `AffordanceAuthorizationTest` rather than assumed.
 - Two guards enforce this going forward: `AffordanceRoutingArchitectureTest` fails the build if any production call site passes a `*Controller.class` to `methodOn(...)` (source-level, because ArchUnit sees the call but not the class literal argument), and `AffordanceAuthorizationTest.InterfaceRoutedInputMetadata` exercises the mechanism end to end against an override that deliberately omits `@RequestBody`.
-- Every `Link` in a response body now goes through `klabisLinkTo`. The one call that had bypassed the authorization check — the `event` rel on `EventController`'s accommodation list — was switched over: reaching that list requires `EVENTS:REGISTRATIONS` or being the coordinator, while reading the event needs `EVENTS:READ`, and neither implies the other, so the link was being offered to callers who would get 403 by following it. Plain `linkTo` remains correct for `Location` headers, which must be returned regardless of whether the caller may `GET` the target.
+- Every `Link` in a response body now goes through `klabisLinkTo`. The one call that had bypassed the authorization check — the `event` rel on `EventController`'s accommodation list — was switched over: reaching that list requires `EVENTS:REGISTRATIONS` or `EVENTS:REGISTRATIONS_READ` over the event (the coordinator), while reading the event needs `EVENTS:READ`, and neither implies the other, so the link was being offered to callers who would get 403 by following it. Plain `linkTo` remains correct for `Location` headers, which must be returned regardless of whether the caller may `GET` the target.
 - Test-local controllers in `AffordanceAuthorizationTest`, `FieldLevelAuthorizationTest` and `HalFormsExpectationsTest` deliberately have no interface — they exercise `HalFormsSupport` directly and are excluded from the architecture guard, which only scans `src/main/java`.
 
 **References:** `openspec/changes/affordance-interface-routing/`, `backend-patterns` skill.
@@ -154,3 +154,207 @@ Two hand-written envelopes remain, both in `common.yaml`: `EntityModelRootModel`
 - `_templates` is emitted on every derived envelope, uniformly. The property is an `additionalProperties` map with no named members, so it only declares that a template map may appear — true of every HAL-FORMS resource. The contract that says *which* templates is `x-hal-templates`, which `haltypes.mjs` turns into the named union in `halTypes.ts`.
 
 **References:** OpenSpec change `derive-hal-envelopes-in-bundler`, ADR-002 (why the backend needs no envelope types at all), `klabis-api-spec` skill.
+
+## ADR-005: A generic `sync` module with integration-owned adapters and a record-held identity mapping
+
+**Status:** Accepted
+
+**Context:**
+
+ORIS event synchronisation existed as one concrete pull path inside the `events` module: `OrisEventImportService.syncEventFromOris` fetched the upstream event and overwrote every ORIS-owned field, protected only by field ownership (`orisId == null` categories survive, an empty event type gets filled) rather than by change detection. A manager's correction to an ORIS-owned field was silently discarded on the next sync — no conflict, no record of the loss.
+
+The ORIS API is also structurally asymmetric: events are pull-only (no `updateEvent`), while persons, club memberships and entries have write operations. A synchronisation mechanism could not assume symmetry between the two sides, and a second integration was expected to need genuinely two-way behaviour that a one-off event-only fix would not generalise to.
+
+**Decision:**
+
+1. **A new top-level `sync` module** (`com.klabis.sync`, `application`/`domain`/`infrastructure` packages, primary port via `@NamedInterface("application")` per ADR-001) owns change detection, conflict handling, retry and audit generically. No type in the module names ORIS or any other external system; a `SyncTarget` addresses the local entity by entity-type enum plus an opaque id string, and an `ExternalReference` addresses the external counterpart by an `ExternalSystem` discriminator plus an opaque id string.
+
+2. **Adapters normally live in the integration's own module** and reach the owning module only through its `events.application` primary ports — the same direction `OrisController` already took — so the owning module gains no new knowledge of the integration's internals. `OrisEventSyncAdapter` is the one exception: OpenSpec change `relocate-oris-event-sync-adapter` moved it into `events.infrastructure.orissync`, inside the module it writes to, because the port it previously reached through (`OrisEventFieldsGateway`) existed only to cross a package boundary — measurement showed the `sync ↔ events` cycle it was guarding against did not exist (`com.klabis.sync` imports nothing from `com.klabis.events`). The adapter is now a plain module-internal collaborator of `events`, holding `EventManagementPort`, `OrisEventFieldsReader` and `EventRepository` directly. The general guidance above still holds for the next integration; treat this adapter's placement as the documented exception, not the new default.
+
+3. **The identity mapping between a Klabis entity and its external counterpart is held only by the synchronisation record** (`SyncRecord`, via its `SyncTarget` and `ExternalReference`), never by either aggregate. `Event` carries no new external-identifier field beyond the `orisId` it already had. This matters most for an external identity that is composite (an ORIS person has both a person id and a club-membership id): the record can hold that pair without forcing either half onto the local aggregate.
+
+4. **Synchronisation resources are addressed uniformly**, at `/api/{entityType}/{id}/sync…`, with `{entityType}` a path parameter constrained to the declared `SyncEntityType` values. One controller in the `sync` module serves every entity type; a new integration becomes reachable by adding an enum value and its adapter, with no new endpoints and no per-module duplication of the same four operations (state, synchronise now, acknowledge conflict, resolve conflict, reset).
+
+An adapter declares what it can actually do — read/write each side, create on either side, whether its projections carry sensitive data — via `SyncCapabilities`, and maps both sides into one shared-shape **canonical projection** (`SyncProjection`) that the engine hashes and diffs without ever looking at the entities themselves. A field only Klabis owns is simply absent from the projection, so editing it is invisible to synchronisation by construction — see `design.md` D3 for the full reasoning, and the `backend-patterns` skill for the adapter/projection authoring contract.
+
+**Three boundary decisions made during implementation, not anticipated in `design.md`:**
+
+- **`@NamedInterface("sync.domain")` deliberately exports the whole `sync.domain` package**, not a narrowed subset. `SynchronizationPort`'s own method signatures already return and accept `SyncRecord`, `SyncTarget`, `SyncEntityType`, `ExternalReference` and `SyncResolution` — types that live in `domain`. Narrowing the named interface without also narrowing the port's signatures would not reduce what a caller depends on; it would just move the compile error from "cannot import the type" to "cannot call the port at all". This was reviewed and deliberately accepted, not an oversight left for later tightening.
+
+- **`OrisEventSyncAdapter` is annotated jMolecules `@Application`, not `@SecondaryAdapter`.** The class holds two hexagonal roles at once: a driven adapter implementing `sync`'s `SynchronizationAdapter` port (called by the engine), and a driving adapter calling `events`' `@PrimaryPort` interface (`EventManagementPort`). jMolecules cannot express both on one class — `@PrimaryAdapter` and `@SecondaryAdapter` are mutually exclusive in the library's own layer predicates, and a `@SecondaryAdapter` may never reach a primary port. `@Application` is the classification that permits the primary-port access the module boundary (point 2 above) requires, while the dependency direction itself is unchanged and still correct.
+
+- **The adapter's field-primitives dependency is a gateway with no sync-engine knowledge.** An interim fix put `@Lazy` on the adapter's import-port dependency to make a bean-construction cycle constructible (`OrisEventImportService` → `SynchronizationPort` → the adapter registry → the adapter → the import port, back) at the cost of fail-fast startup. Change `sync-followup-oris-import-cycle` replaced it by splitting the port along its two roles: the primitives the adapter calls (`readOrisFields`, `applyOrisSync`) moved to a dedicated `OrisEventFieldsGateway` implemented without any dependency on `SynchronizationPort`, while `OrisEventImportPort` keeps the orchestration (`importEventFromOris`, `syncEventFromOris`) and may keep depending on `SynchronizationPort`. The adapter never sees the orchestration bean, the cycle is gone, and wiring is eager again. OpenSpec change `relocate-oris-event-sync-adapter` has since folded that gateway into the adapter itself — `readOrisFields` became `readExternal` and `applyOrisSync` became `applyToLocal`, both now methods on `OrisEventSyncAdapter` — because the adapter had moved inside `events` and the gateway's sole purpose, crossing the package boundary, no longer applied. No cycle reappeared: the adapter still depends on `EventManagementPort` (a primary port) plus the plain `OrisEventFieldsReader` and `EventRepository`, and `OrisEventImportService` still reaches the sync engine only through `SynchronizationPort`.
+
+**Consequences:**
+
+- A future integration (member synchronisation, entries) follows the same shape: an adapter in its own module, a projection type, capabilities declared honestly rather than implemented as throwing methods — and reaches the `sync` module and its own module only through primary ports, per ADR-001.
+- `Event.syncFromOris` became the inward write the adapter's `applyToLocal` invokes, rather than the whole synchronisation path; its field-ownership merge behaviour for categories is unchanged.
+- A conflict — a local edit to an ORIS-owned field that cannot be written outward — now blocks synchronisation and asks a human, instead of being silently overwritten. This is the one user-visible behaviour change (`design.md` D6).
+- The three boundary decisions above are precedents: the next adapter that needs to call a primary port on its own module should also be `@Application`, not forced into `@SecondaryAdapter`; the next module exporting a named interface should check whether its primary port's own signatures already force the interface wide before trying to narrow it.
+
+**References:** OpenSpec change `add-bidirectional-sync-engine` (`proposal.md`, `design.md` — D1–D19 — `tasks.md`), ADR-001 (primary-port-only cross-module dependency rule), `backend-patterns` skill.
+
+## ADR-006: Tests substitute the `Clock` bean via `@TestBean`, not a `@Configuration` override
+
+**Status:** Accepted
+
+**Context:**
+
+The `Clock` dependency-injection seam (`com.klabis.common.ClockConfiguration`) exists so application components read the current instant from an injected `Clock` rather than `Instant.now()`, letting tests control time. The `sync` engine's scheduled-scan and history-retention tests need a fixed, advanceable clock in a full Spring context.
+
+Two approaches were tried and rejected. Registering a test `@Bean Clock clock()` under the production bean's name plus `spring.main.allow-bean-definition-overriding=true` works only by registration-order luck — the flag is also context-wide, silencing every accidental duplicate-bean definition, not just the clock — and moving the test config from a nested class to a shared `@Import` target already flipped the order once, letting the real `Clock.systemDefaultZone()` win silently. Marking the production bean `@ConditionalOnMissingBean` is order-safe only on `@AutoConfiguration` classes; `ClockConfiguration` is a plain component-scanned `@Configuration`, so the condition is evaluated in the same `ConfigurationClassPostProcessor` pass as an `@Import`ed test configuration and Spring's reference documentation explicitly states these conditions cannot be used reliably in a regular `@Configuration` class.
+
+**Decision:**
+
+`ClockConfiguration.clock()` stays a plain, unconditional `@Bean`. A test that needs to control time replaces it with Spring's bean-override infrastructure — `@TestBean` (the non-mock sibling of `@MockitoBean`, already used across the test suite):
+
+```java
+@TestBean(enforceOverride = true)
+private Clock clock;
+
+static Clock clock() {                       // factory name matches the field name
+    return FixedClockTestSupport.fixedClock();
+}
+```
+
+`@TestBean` replaces the target bean in the `BeanFactory` regardless of configuration registration order, needs no global override flag, and `enforceOverride = true` turns a missing production bean into a hard failure. The field is typed `Clock` because `@TestBean` matches the bean to replace by the field's type (and name), and the production bean is declared `Clock`; a test that needs the mutable API narrows the injected instance back to `MutableClock` (the factory returns one). `com.klabis.sync.fixtures.FixedClockTestSupport` holds only the shared `FIXED_NOW` constant and the `fixedClock()` factory body — it is not a Spring configuration.
+
+**Consequences:**
+
+- Clock substitution is deterministic and local to the test that does it; no context-wide flag, no reliance on evaluation order.
+- The production configuration is untouched — no auto-configuration idiom retrofitted onto a hand-written `@Configuration`.
+- A test opts in explicitly with a `@TestBean` field plus its static factory method; being on the classpath does nothing.
+
+**References:** OpenSpec change `sync-followup-clock-injection`, ADR-005 (the `sync` module this seam serves).
+
+## ADR-007: Enum HAL-FORMS options are registered per request type via `HalFormsConfiguration.withOptions`
+
+**Context:**
+
+Enum-typed request properties (gender, driving licence group, deactivation reason, …) used to get their HAL-FORMS `options` from value lists hand-written in controllers. The lists drifted from the generated enums. The explicit per-request options (`klabisAffordWithOptions`) are stored in request attributes keyed by property **name** only, merged across all affordances of one response. Feeding automatically computed options through that channel leaks them into an unrelated affordance that has a property with the same name.
+
+**Decision:**
+
+`EnumOptionsAutoConfiguration` (`common.ui`, an `@MvcComponent`) scans the `*.infrastructure.restapi` packages (where the generated request DTOs live) for record classes at startup, finds enum-typed components (unwrapping `JsonNullable`, `Optional` and collections), and registers their `@JsonValue` values in declaration order through `HalFormsConfiguration#withOptions(Class, String, Function)`. Spring HATEOAS keys that registry by `(payload type, property name)`, so the options cannot collide across affordances. Per-request explicit options still take priority for filtered subsets (assignable authorities, adapter-supported sync resolutions).
+
+**Consequences:**
+
+- A new enum-typed request property gets inline options with no controller code. The frontend localises the values (see `x-hal-input-type`).
+- Option order follows enum declaration order in the API spec, so the spec orders enum values for display.
+- The record scan runs once per application context. `@MvcComponent` makes it part of every `@WebMvcTest` slice without an `@Import`.
+
+## ADR-008: Legal guardians are modelled by guardian groups; non-member guardians log in with `EXTnnnn`
+
+**Status:** Accepted
+
+**Context:**
+
+A minor's legal guardian used to be a value (`GuardianInformation`) copied into the member record: one guardian per child, no account, data duplicated across siblings. The family group that existed next to it was exclusive (a user in at most one group) and treated the parent as a member of the group, so it could not express a child with two guardians from different households. Guardians who are not club members also need an account, while `common.users.user_name` is a `VARCHAR(7)` holding the registration number, and token customisation and account activation looked the member up by that username.
+
+**Decision:**
+
+1. `FamilyGroup` became `LegalGuardianGroup` (`members.legalguardiangroup`): owners are the guardians (`UserId`), members are minors (`MemberId`). A guardian may be in many groups, a minor in at most one, no two groups share the same guardian set, and the group name is generated from the guardians' surnames. `Member` knows nothing about guardians; it only sees them through the `LegalGuardianGroupPort` and `GuardianContactResolver`.
+2. All find-or-create/merge logic lives in `LegalGuardianGroupService` (`setGuardiansOf`, `changeGroupGuardians`): move to an existing group with the same guardian set, else edit in place when all children move, else create a new group.
+3. A guardian who is not a member is the separate aggregate `LegalGuardian` (`members.legal_guardians`, `id` = `common.users.id`). A user is a `Member` or a `LegalGuardian`, never both; an adult registration may take a guardian over, keeping the `UserId` and the login.
+4. Non-member guardians log in with a generated `EXTnnnn` number from a dedicated DB sequence (`EXT0001`, `EXT0002`, ...), which has the shape of a registration number, so the column, login form and activation form stay unchanged.
+5. Because a taken-over guardian keeps `EXTnnnn` as login, username no longer equals the registration number. The token customiser and activation verifier therefore look the member up by `UserId` (shared UUID). `findByRegistrationNumber(EXTnnnn)` must never be used to conclude "not a member".
+
+**Rationale:**
+
+Guardianship is a relation to the child; grouping by the exact guardian set shares it between siblings without errors for divorced or step families and keeps the group as the future anchor for guardian permissions. Reusing the registration-number format avoids schema and UI changes for logins; the lookup by `UserId` follows from the existing invariant `MemberId` = `UserId`.
+
+**Alternatives considered:**
+
+- Guardian relation per child without a group: rejected, the group is the intended place for future guardian permissions.
+- Keeping exclusivity of guardians in groups: cannot model a child with two guardians from different households.
+- E-mail as login: needs a wider column, collides on shared e-mails, and e-mail change would change the login.
+- Assigning a registration number on promotion to member: changes the login of an existing user.
+
+**Consequences:**
+
+- The `EXT` code must never be issued to a real club; the series holds 9,999 numbers.
+- Guardian numbers are not sent anywhere; an administrator communicates them (visible on the guardian profile).
+- `data_incomplete` is not recomputed when guardians or their contacts change (except when a minor turns 18), an accepted staleness.
+
+**References:** OpenSpec change `legal-guardians-via-groups` (`design.md` D1, D2, D4, D5), ADR-001.
+
+
+---
+
+## ADR-009: GDPR field encryption uses Spring Security `AesGcmBytesEncryptor` (AES-256-GCM)
+
+**Status:** Accepted
+
+**Context:** Sensitive fields (birth number, bank account) are encrypted at rest through `EncryptionService`. The previous implementation used `jasypt-spring-boot-starter` with password-based CBC encryption (no authentication of ciphertext).
+
+**Decision:** `SharedEncryptionService` wraps `AesGcmBytesEncryptor.withPassword(password, salt)` from Spring Security Crypto, configured by `klabis.encryption.password` and `klabis.encryption.salt` (hex; env `KLABIS_ENCRYPTION_PASSWORD`, `KLABIS_ENCRYPTION_SALT`). Output is hex. Encryption stays non-deterministic (random IV); lookups use separate hash columns.
+
+**Rationale:** GCM is authenticated encryption, so tampered ciphertext fails to decrypt. Spring Security Crypto is already on the classpath, which removes the jasypt dependency.
+
+**Consequences:**
+
+- Losing the password or salt makes stored values unreadable; both must be backed up.
+- Ciphertext format differs from the jasypt one; there was no production data, so no migration exists.
+- The password is the only real secret: the salt is not secret and only separates derived keys. Use a long random password (e.g. `openssl rand -base64 32`). `AesGcmBytesEncryptor.withPassword` derives the key with PBKDF2WithHmacSHA256, 600,000 iterations, 256-bit key (verified in spring-security-crypto 7.1.1); the count is a private constant and not configurable, so a weak password is not compensated by key stretching.
+- The salt must be a non-empty, even-length hex string (generate with `openssl rand -hex 16`); the application fails at startup otherwise. The example salt in dev configs (`.env.example`, run scripts, test properties) is public and must never be reused in a deployed environment.
+
+## ADR-010: Relationship-based authorization over a per-request permission snapshot
+
+**Status:** Accepted
+
+**Context:**
+
+Authorization used global authorities (`MEMBERS:MANAGE`, `EVENTS:MANAGE`, …) plus one hard-wired relation, "the target is me" (`@OwnerVisible`). The club needs permissions that hold only over specific targets and that come from relationships — a legal guardian over their children (ADR-008), owners of a group over its members — with more to follow. At the same time the authorities were a JWT claim frozen at login, so a revoked permission kept working until the token expired, and relationship-derived permissions change whenever a group changes, so they cannot live in a token at all. The decision was also taken in four different places with separate code: `HasAuthorityMethodInterceptor`, `HalFormsSupport` (affordances), field security, and imperative checks in controllers (`CurrentUserData.hasAuthority`, `canManage…` flags). `Authority.Scope` (`GLOBAL` / `CONTEXT_SPECIFIC`) existed but had no runtime effect.
+
+**Decision:**
+
+1. **An authority describes its target and its grant forms.** `Authority` carries `targetType` (`MEMBER`, `EVENT`, `NONE`) and `grantForms` (`ALL` = may be held over everything, including targets created later; `SPECIFIC` = may be held over specific targets). Assignable in the permissions dialog ⇔ `ALL` (minus standard authorities and `DEVELOPER`); derivable from a relationship (`Authority.holdableOverTargets()`) ⇔ `SPECIFIC`. Whether a `SPECIFIC` authority is also delegatable to others is a separate matter: free groups delegate only MEMBER-typed ones, and the event coordinator authorities come from the coordinator relationship alone. An administrator authority is `{ALL}`-only and can never be delegated. `Authority.Scope` and `AuthorizationPolicy.checkGlobalAuthorityNotGrantedViaGroup` are removed.
+2. **Grants are united into an immutable per-request snapshot.** `AuthorizationSnapshot` holds `overAll` (from `PermissionService`, plus standard authorities) and `overTargets` (the union of all `RelationshipSource` beans — an SPI in `common.authorization` that any module implements in its `infrastructure`, querying its own repositories per ADR-001). `has(A, t) = A ∈ overAll ∨ t ∈ overTargets[A]`. A source's grant is accepted only for a `SPECIFIC` authority whose `targetType` matches, so a misbehaving source cannot hand out an administrator authority. The snapshot is carried by the authentication: the resource server builds a new `KlabisJwtAuthenticationToken` per request, and the token memoizes a supplier that calls `AuthorizationSnapshotLoader` on the first authorization question, so every decision in a request sees one permission set without a request-scoped bean; requests that ask nothing pay nothing. `AuthorizationSnapshotProvider.current()` reads the snapshot from the current authentication. Each source returns all grants of a user in one query. Without an authenticated user (listeners, scheduled jobs) the snapshot is empty and nothing is granted.
+3. **Tokens stop carrying authorities.** User access tokens no longer have an `authorities` claim; `KlabisJwtAuthenticationToken.getAuthorities()` returns the snapshot's `overAll` (memoized), so Spring's own `hasAuthority` SpEL stays consistent with the evaluator and a grant or revocation applies on the user's next request. `client_credentials` tokens (no `user_id`) keep their scope-derived authorities and have no targeted grants.
+4. **One evaluator answers every authorization question.** `AuthorizationEvaluator` is used by method security (`HasAuthorityMethodInterceptor`), affordances and link filtering (`HalFormsSupport`), response-field visibility (`SecuredBeanPropertyWriter`), request-body field checks (`RequestBodyFieldAuthorizationAdvice`), HAL-FORMS property `readOnly`, and application code (`has(authority)`, `has(authority, target)`, `isSelf(target)`). The rule for an element guarded by `authorities = [A1..An]`, optional target `t` and optional owner-visibility is:
+
+   ```
+   allowed ⇔ ∃ Ai: (t present ? has(Ai, t) : hasOverAll(Ai))   ∨   (ownerVisible ∧ isSelf(t))
+   ```
+
+   Field rules are expressed only with `@HasAuthority`, `@OwnerVisible`, `@TargetId` and `@ReadAuthority`; SpEL `@PreAuthorize` on fields is not supported. The target is declared by `@TargetId(TargetType.X)` on a path parameter or record component (spec: `x-klabis-target-id: X`); `@HasAuthority` takes a list (any of). `AuthorizationArchitectureTest` (ArchUnit) forbids reading the security annotations or `Authentication.getAuthorities()` outside `common.authorization` and `common.security`.
+
+```mermaid
+flowchart LR
+    PS[PermissionService] -->|grants over everything| LD[AuthorizationSnapshotLoader]
+    RS[RelationshipSource beans] -->|grants over targets| LD
+    LD -->|once per token| TOK[KlabisJwtAuthenticationToken]
+    TOK -->|snapshot of the request| SP[AuthorizationSnapshotProvider]
+    SP --> EV[AuthorizationEvaluator]
+    EV --> MI[HasAuthorityMethodInterceptor]
+    EV --> HF[HalFormsSupport affordances and links]
+    EV --> FS[field security and request-body advice]
+    EV --> APP[controllers and postprocessors]
+    TOK -->|overAll as getAuthorities| SPR[Spring method security]
+```
+
+**Rationale:**
+
+"Global" becomes simply a grant over every target of a kind, so one model covers administrators, owners and delegates, and the same authority (e.g. `EVENTS_REGISTRATIONS`) can be held both ways. Loading permissions per request is what makes revocation immediate; memoizing them makes "one permission set per request" true by construction. A single code path makes an offered action always one the user may perform — parity between separate implementations cannot drift because there is only one.
+
+**Alternatives considered:**
+
+- *Separate enums for global and targeted permissions* (D1): rejected — the same authority must be holdable over everything and over specific targets.
+- *Eager snapshot load in `AccountStatusValidationFilter`* (D2): wastes the relationship queries on the many requests that never ask an authorization question.
+- *Per-check queries `check(user, A, target)`* (D2): N queries for a list and no single-set guarantee within a request.
+- *A materialized grants table maintained by domain events* (D2): risk of drift and a backfill for every new relationship kind.
+- *Keep global authorities in the token, load only targeted grants per request* (D4): revocation would still wait for token expiry, and two sources with different freshness break "one set per request".
+- *Keep the separate code paths and add a parity test* (D5): parity tests only cover the cases someone thought of.
+- *An external authorization engine (SpiceDB, OpenFGA)*: the club has hundreds of members and few relationship kinds; an in-process model is sufficient.
+
+**Consequences:**
+
+- An authenticated request that asks an authorization question costs 1 + N(sources) queries; volume is bounded by club size.
+- Application code never reads authorities itself: it injects `AuthorizationEvaluator` (`CurrentUserData` carries no authorities). The ArchUnit rule fails the build otherwise.
+- A Spring `@PreAuthorize("hasAuthority(...)")` on a method sees only grants over everything; anything that may be held over a target must go through `@HasAuthority` + `@TargetId` or the evaluator.
+- Event coordinators are not special-cased in controllers: `EventCoordinatorRelationshipSource` grants them `EVENTS_EDIT` and `EVENTS_REGISTRATIONS_READ` over the events they coordinate (SPECIFIC, EVENT), and operations list those beside `EVENTS_MANAGE` / `EVENTS_REGISTRATIONS`. `EVENTS_MANAGE` deliberately stays ALL-only — it guards catalogue operations with no event to name and `publishEvent` / `cancelEvent`, which coordinators must not perform. Changing an event's coordinators is `EVENTS_MANAGE` only (`UpdateEventRequest.coordinators`), so the coordinator role cannot propagate itself.
+- A new delegated authority needs `SPECIFIC` in its `grantForms`, a `RelationshipSource` producing its grants, and `x-klabis-target-id` on the operations it guards (`validate.mjs` requires a target of the matching type).
+- Tests build a token carrying a fixed snapshot through `@WithKlabisMockUser(authorities = …, targetGrants = @TargetGrant(...))`; `@WebMvcTest`s need no database.
+- After a rollback to a version that reads the claim, users must log in again, because tokens issued by this version lack it.
+
+**References:** OpenSpec change `rebac-2-target-authorization` (`design.md` D1, D2, D4, D5), ADR-001, ADR-008.

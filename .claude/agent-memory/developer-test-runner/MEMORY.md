@@ -1,67 +1,31 @@
 # Test Runner Agent Memory
 
-## PermissionController HATEOAS Links Fix (2026-03-03)
-
-### Issue
-Test `PermissionControllerTest.shouldIncludeHateoasLinks()` was failing with duplicate self links causing an array instead of object.
-
-### Solution
-Separated concerns:
-1. Removed self link from `PermissionsResponseModelAssembler` - assembler now only instantiates model
-2. Controller now adds both self link WITH affordances and separate "permissions" link
-
-**Files Modified:**
-- `/backend/src/main/java/com/klabis/common/users/infrastructure/restapi/PermissionsResponseModelAssembler.java`
-- `/backend/src/main/java/com/klabis/common/users/infrastructure/restapi/PermissionController.java`
-
-### Key Lesson
-Avoid duplicate link additions with same relationship name - HATEOAS merges them into arrays instead of objects. Assemblers should add standard links, controllers add action-specific affordances.
-
-## Calendar Module Visibility Fixes (2026-03-03)
-
-### Issue
-Calendar application layer classes were not public, causing visibility errors when imported by controller and test classes in other packages:
-- `CalendarItemDto` (record)
-- `CreateCalendarItemCommand` (record)
-- `UpdateCalendarItemCommand` (record)
-- `InvalidCalendarQueryException` (exception class)
-- `CalendarItemReadOnlyException` (exception class)
-- `CalendarNotFoundException` (exception class)
-
-### Solution
-Made all application layer classes public to allow cross-package access from infrastructure layer:
-
-**Files Modified:**
-- `/backend/src/main/java/com/klabis/calendar/application/CalendarItemDto.java` - added `public` to record
-- `/backend/src/main/java/com/klabis/calendar/application/CreateCalendarItemCommand.java` - added `public` to record
-- `/backend/src/main/java/com/klabis/calendar/application/UpdateCalendarItemCommand.java` - added `public` to record
-- `/backend/src/main/java/com/klabis/calendar/application/InvalidCalendarQueryException.java` - added `public` class and constructor
-- `/backend/src/main/java/com/klabis/calendar/application/CalendarItemReadOnlyException.java` - added `public` class and constructor
-- `/backend/src/main/java/com/klabis/calendar/application/CalendarNotFoundException.java` - added `public` class and constructor
-- `/backend/src/test/java/com/klabis/calendar/infrastructure/jdbc/CalendarJdbcRepositoryTest.java` - added missing import for `CalendarRepository`
-
-### Test Results (Latest - 2026-03-03)
-Calendar package tests: 108 tests pass (100% success rate, 0 failures)
-All 1382 backend tests pass (10 skipped)
-
-## Events Module Import Fixes (2026-03-03)
-
-### Issue
-Events module had missing imports causing compilation failures:
-- `EventRegistrationController.java` - missing import for `DuplicateRegistrationException`
-- `EventControllerTest.java` - missing import for `EventNotFoundException`
-- `EventRegistrationControllerTest.java` - missing imports for exception classes
-
-### Root Cause
-Architecture refactoring moved exception classes to `application` package but imports weren't updated in controller and test classes.
-
-### Solution
-Added missing imports to three files:
-
-**Files Modified:**
-- `/backend/src/main/java/com/klabis/events/infrastructure/restapi/EventRegistrationController.java` - added `import com.klabis.events.application.DuplicateRegistrationException;`
-- `/backend/src/test/java/com/klabis/events/infrastructure/restapi/EventControllerTest.java` - added `import com.klabis.events.application.EventNotFoundException;`
-- `/backend/src/test/java/com/klabis/events/infrastructure/restapi/EventRegistrationControllerTest.java` - added imports for `DuplicateRegistrationException`, `EventNotFoundException`, `RegistrationNotFoundException`
-
-### Test Results
-All 1392 backend tests pass: 1382 passed, 10 skipped, 0 failed
+- [Backend test run (2026-10-04) worktree-next-proposal](backend_test_run_2026_10_04_worktree.md) — 4087/4087 passed
+- [Backend test run (2026-10-04) full suite](backend_test_run_2026_10_04_full_suite.md) — 4068/4068 passed
+- [Frontend test hang (2026-09-30) MemberRegistration.integration.test.tsx](frontend_test_hang_2026_09_30.md) — hangs on execution, no test names printed
+- [Frontend test run (2026-09-30) legal-guardians-refactor](frontend_test_run_2026_09_30.md) — 2124/2124 passed
+- [Backend test run (2026-09-30) full suite](backend_test_run_2026_09_30_full_suite.md) — 3936/3936 passed with SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Backend test run (2026-09-30) legal-guardians-refactor](backend_test_run_2026_09_30_legal_guardians.md) — 3927/3927 passed with SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Backend test run (2026-09-26) full rerun verify](backend_test_run_2026_09_26_full_rerun_verify.md) — 3780/3780 passed, 14 skipped with --rerun-tasks + SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Frontend test run (2026-09-26) full final rerun](frontend_test_run_2026_09_26_full_final_rerun.md) — 2058/2058 passed; build succeeded 9.44s Vite run
+- [Frontend test run (2026-09-26) reviewchanges two files](frontend_test_run_2026_09_26_reviewchanges.md) — 92/92 passed (MemberDetailPage.test.tsx 56/56, MembersPage.test.tsx 36/36)
+- [Backend test run (2026-09-26) full final rerun](backend_test_run_2026_09_26_full_final_rerun.md) — 3770/3770 passed, 14 skipped with --rerun-tasks + SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Frontend test run (2026-09-26) full final](frontend_test_run_2026_09_26_full_final.md) — 2055/2055 passed; build succeeded with 8.36s Vite run
+- [Frontend test run (2026-09-26) members three files](frontend_test_run_2026_09_26_members_three_files.md) — 96/97 passed; MemberDetailPage.groups.test.tsx failure in SyncStatusIndicator mock (toHref export missing)
+- [Backend test run (2026-09-26) events module — sync link + endpoint removal](backend_test_run_2026_09_26_reviewchanges.md) — 202/202 passed (events + sync tests); new ListRowSyncLinkTests passing
+- [buildSrc test runner quirk](buildsrc_test_runner_quirk.md) — `--module :buildSrc` may report "No fresh JUnit XML" despite a green run; check XML mtimes, re-parse with --skip-run
+- [Backend test run (2026-09-26) rerun + modulith skip (final)](backend_test_run_2026_09_26_full_rerun_with_modulith_skip.md) — 3766/3766 passed, 14 skipped with --rerun-tasks + SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Frontend test run (2026-09-26)](frontend_test_run_2026_09_26.md) — 2052/2052 passed; member-synchronization feature adds 29 tests; build clean
+- [Frontend test run I1 (2026-09-23)](frontend_test_run_i1.md) — 2004/2004 passed; SyncStatusIndicator introduced
+- [Frontend test run I2 (2026-09-23)](frontend_test_run_i2.md) — 2006/2006 passed; SyncStatusIndicator wired into EventDetailPage
+- [Frontend test run I4 (2026-09-23)](frontend_test_run_i4.md) — 2023/2023 passed; SyncStatusOverlay added
+- [Frontend test run I5 (2026-09-23)](frontend_test_run_i5.md) — 2023/2023 passed; SYNC:MANAGE overlay added; lint+build clean
+- [Frontend test run I6 (2026-09-23)](frontend_test_run_i6.md) — 2023/2023 passed; post-feature passes (env/scope, spec regen, type regen restoring missing disciplines endpoints); lint+build clean
+- [Backend test run (2026-09-26)](backend_test_run_2026_09_26.md) — 3772/3772 passed on feature/member-synchronization-reviewchanges; 140 new tests
+- [Backend test run (2026-09-26) full rerun](backend_test_run_2026_09_26_full.md) — 3765/3765 passed with --rerun-tasks; MemberControllerApiTest 104/104 skipped (module unchanged)
+- [Backend test run (2026-09-26) modulith skip](backend_test_run_2026_09_26_modulith_skip.md) — 3765/3765 passed with SPRING_MODULITH_TEST_SKIP_OPTIMIZATIONS=true
+- [Backend test run (2026-09-23)](backend_test_run_2026_09_23.md) — 3632/3632 passed after I6-BE OAuth2 SYNC scope registration; 37/37 in authorization-server package
+- [Backend test run (2026-09-17)](backend_test_run_2026_09_17.md) — 3502/3502 passed after OrisEventFieldsGatewayService folded into OrisEventSyncAdapter
+- [Backend test run (2026-09-04)](backend_test_run_2026_09_04.md) — 3399/3399 passed after sync/oris.eventsync/events cleanup
+- [HATEOAS duplicate links](feedback_hateoas_duplicate_links.md) — same-relation links merge into arrays; split assembler vs controller responsibilities
+- [Post-refactor fixes (2026-03-03)](feedback_post_refactor_fixes.md) — visibility + import-update gaps after package moves in calendar and events

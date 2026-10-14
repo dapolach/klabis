@@ -2,6 +2,8 @@ package com.klabis.events.infrastructure.jdbc;
 
 import com.klabis.events.EventCategoryId;
 import com.klabis.events.domain.EventRegistration;
+import com.klabis.events.domain.EventRegistrationCreateEventRegistrationBuilder;
+import com.klabis.events.domain.RegistrationNote;
 import com.klabis.members.MemberId;
 import com.klabis.events.domain.SiCardNumber;
 import org.springframework.data.relational.core.mapping.Column;
@@ -39,6 +41,21 @@ class EventRegistrationMemento {
     @Column("registered_at")
     private Instant registeredAt;
 
+    @Column("wants_shared_transport")
+    private boolean wantsSharedTransport;
+
+    @Column("wants_shared_accommodation")
+    private boolean wantsSharedAccommodation;
+
+    @Column("wants_to_rent_si")
+    private boolean wantsToRentSi;
+
+    @Column("internal_note")
+    private String internalNote;
+
+    @Column("oris_note")
+    private String orisNote;
+
     /**
      * Default constructor required by Spring Data JDBC.
      */
@@ -57,9 +74,14 @@ class EventRegistrationMemento {
         EventRegistrationMemento memento = new EventRegistrationMemento();
         memento.id = registration.id();
         memento.memberId = registration.memberId().uuid();
-        memento.siCardNumber = registration.siCardNumber().value();
+        memento.siCardNumber = registration.siCardNumber() != null ? registration.siCardNumber().value() : null;
+        memento.wantsToRentSi = registration.wantsToRentSi();
         memento.categoryId = registration.categoryId() != null ? registration.categoryId().value() : null;
         memento.registeredAt = registration.registeredAt();
+        memento.wantsSharedTransport = registration.wantsSharedTransport();
+        memento.wantsSharedAccommodation = registration.wantsSharedAccommodation();
+        memento.internalNote = RegistrationNote.textOrNull(registration.internalNote());
+        memento.orisNote = RegistrationNote.textOrNull(registration.orisNote());
 
         return memento;
     }
@@ -70,13 +92,17 @@ class EventRegistrationMemento {
      * @return a reconstituted EventRegistration entity
      */
     EventRegistration toEventRegistration() {
-        return EventRegistration.reconstruct(
-                this.id,
-                new MemberId(this.memberId),
-                new SiCardNumber(this.siCardNumber),
-                this.categoryId != null ? new EventCategoryId(this.categoryId) : null,
-                this.registeredAt
-        );
+        return EventRegistration.reconstruct(this.id, this.registeredAt,
+                EventRegistrationCreateEventRegistrationBuilder.builder()
+                        .memberId(new MemberId(this.memberId))
+                        .siCardNumber(this.siCardNumber != null ? new SiCardNumber(this.siCardNumber) : null)
+                        .wantsToRentSi(this.wantsToRentSi)
+                        .categoryId(this.categoryId != null ? new EventCategoryId(this.categoryId) : null)
+                        .wantsSharedTransport(this.wantsSharedTransport)
+                        .wantsSharedAccommodation(this.wantsSharedAccommodation)
+                        .internalNote(RegistrationNote.ofNullable(this.internalNote))
+                        .orisNote(RegistrationNote.ofNullable(this.orisNote))
+                        .build());
     }
 
     // Package-private getters for Spring Data JDBC
@@ -98,5 +124,17 @@ class EventRegistrationMemento {
 
     Instant getRegisteredAt() {
         return registeredAt;
+    }
+
+    boolean isWantsSharedTransport() {
+        return wantsSharedTransport;
+    }
+
+    boolean isWantsSharedAccommodation() {
+        return wantsSharedAccommodation;
+    }
+
+    boolean isWantsToRentSi() {
+        return wantsToRentSi;
     }
 }

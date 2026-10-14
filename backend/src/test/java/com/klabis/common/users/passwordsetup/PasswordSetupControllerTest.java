@@ -1,8 +1,7 @@
 package com.klabis.common.users.passwordsetup;
 
 import tools.jackson.databind.ObjectMapper;
-import com.klabis.common.WithPostprocessors;
-import com.klabis.common.encryption.EncryptionConfiguration;
+import com.klabis.common.CommonWebMvcTest;
 import com.klabis.common.users.UserId;
 import com.klabis.common.users.application.PasswordSetupService;
 import com.klabis.common.users.domain.PasswordSetupToken;
@@ -16,10 +15,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Duration;
@@ -33,10 +29,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@WebMvcTest(controllers = PasswordSetupController.class)
-@Import(EncryptionConfiguration.class)
+@CommonWebMvcTest
 @DisplayName("PasswordSetupController API tests")
-@WithPostprocessors
 class PasswordSetupControllerTest {
 
     @Autowired
@@ -45,7 +39,7 @@ class PasswordSetupControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
-    @MockitoBean
+    @Autowired
     private PasswordSetupService passwordSetupServiceMock;
 
     @Nested
@@ -331,6 +325,23 @@ class PasswordSetupControllerTest {
 
             verify(passwordSetupServiceMock, times(1))
                     .requestNewToken("ZBM0101", "test@example.com");
+        }
+
+        @Test
+        @DisplayName("should return the same neutral response when the service rejects the request")
+        void shouldReturnNeutralResponseWhenServiceRejectsRequest() throws Exception {
+            TokenRequestRequest request = TokenRequestRequestBuilder.builder()
+                    .registrationNumber("ZBM0101")
+                    .email("test@example.com")
+                    .build();
+            doThrow(new TokenValidationException("Account is not in pending activation status"))
+                    .when(passwordSetupServiceMock).requestNewToken("ZBM0101", "test@example.com");
+
+            mockMvc.perform(post("/api/auth/password-setup/request")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(request)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.message").value("If your account is pending activation, you will receive an email with a new setup link."));
         }
 
         @Test

@@ -64,17 +64,18 @@ Onboarding pro vývojáře bez Spring/DDD znalostí. Žádný projektový kód �
 
 ### `06-security.html` — Bezpečnost
 - OAuth2 AS + RS přehled
-- JWT s vlastními claims (user_id, memberIdUuid, authorities, registrationNumber)
-- `KlabisJwtAuthenticationToken`
-- `Authority` enum (vč. Scope GLOBAL/CONTEXT_SPECIFIC)
-- `@HasAuthority` (method-level)
-- `@OwnerVisible` + `@OwnerId` (field-level)
-- `OwnershipResolver`
+- JWT s vlastními claims (user_id, memberIdUuid, registrationNumber; uživatelský token bez authorities)
+- `KlabisJwtAuthenticationToken` (nese snapshot oprávnění requestu, `getAuthorities()` z něj)
+- `Authority` enum (`targetType` MEMBER/EVENT/NONE, `grantForms` ALL/SPECIFIC)
+- Snapshot oprávnění: `AuthorizationSnapshot`, `AuthorizationSnapshotLoader`, `AuthorizationSnapshotProvider`, `RelationshipSource`, `TargetRef`
+- `AuthorizationEvaluator` + ArchUnit `AuthorizationArchitectureTest`
+- `@HasAuthority` (seznam) + `@TargetId` (method-level)
+- `@OwnerVisible`, `@ReadAuthority` (field-level)
 - Pomocné komponenty: `AccountStatusValidationFilter`, `CorsConfiguration`, `FrontendProperties`, `PasswordEncoderConfiguration`
 - Custom AuthenticationEntryPoint
 - **OAuth2 customizace v `members`:** `KlabisAuthorizationServerCustomizer`, `KlabisUserDetailsService`, `MemberIdToUuidConverter`
 
-**Zdroj:** `backend/src/main/java/com/klabis/common/security/`, `common/security/fieldsecurity/`, `common/users/Authority.java`, `common/users/HasAuthority.java`, `members/infrastructure/authorizationserver/KlabisAuthorizationServerCustomizer.java`, `members/infrastructure/authorizationserver/KlabisUserDetailsService.java`, `members/infrastructure/authorizationserver/MemberIdToUuidConverter.java`
+**Zdroj:** `backend/src/main/java/com/klabis/common/security/`, `common/security/fieldsecurity/`, `common/authorization/`, `common/users/Authority.java`, `common/users/HasAuthority.java`, `members/infrastructure/authorizationserver/KlabisAuthorizationServerCustomizer.java`, `members/infrastructure/authorizationserver/KlabisUserDetailsService.java`, `members/infrastructure/authorizationserver/MemberIdToUuidConverter.java`
 
 ### `07-common.html` — Common — sdílené stavební bloky
 - `UserGroup` building block — kompozice, invariants
@@ -87,7 +88,7 @@ Onboarding pro vývojáře bez Spring/DDD znalostí. Žádný projektový kód �
 - `TemplateRenderer`, `Template`, `ThymeleafTemplateRenderer`
 - Hierarchie doménových výjimek (`BusinessRuleViolationException`, `InvalidDataException`, `AuthorizationException`, `InsufficientAuthorityException`, `ResourceNotFoundException`, `MemberProfileRequiredException`)
 
-**Zdroj:** `backend/src/main/java/com/klabis/common/usergroup/`, `common/email/`, `common/templating/`, `common/exceptions/`
+**Zdroj:** `backend/src/main/java/com/klabis/common/groups/`, `common/email/`, `common/templating/`, `common/exceptions/`
 
 ### `08-modules.html` — Spring Modulith a moduly
 - Publikace eventu (`registerEvent`)

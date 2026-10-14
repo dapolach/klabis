@@ -10,12 +10,12 @@ Covers how members register for and unregister from club events. Defines the reg
 
 The system SHALL allow authenticated members to register themselves for ACTIVE events with open registrations (future event date AND registration deadline not passed). Only users with an associated member profile can register. When the event has categories defined, the member MUST select a category. After a successful registration the member remains on the event detail page and the registration list refreshes to include their new registration.
 
-When the registration form opens, the SI card number field SHALL be prefilled with the member's SI card number from their profile if one is set. The prefilled value MAY be overwritten by the member for this registration without affecting the profile.
+When the registration form opens for an event that uses SI cards, the SI card number field SHALL be prefilled with the member's SI card number from their profile if one is set. The prefilled value MAY be overwritten by the member for this registration without affecting the profile. Whether the SI card number is required follows the event's SI policy.
 
 #### Scenario: Member registers for an open event
 
 - **WHEN** authenticated member clicks the register button for an active event with open registrations
-- **AND** provides their SI card number
+- **AND** provides their SI card number where the event requires one
 - **THEN** the registration is created
 - **AND** the member stays on the event detail page
 - **AND** the registration list refreshes and shows the new registration
@@ -24,7 +24,7 @@ When the registration form opens, the SI card number field SHALL be prefilled wi
 #### Scenario: Registration form prefills SI card number from profile
 
 - **GIVEN** an authenticated member has an SI card number recorded in their profile
-- **WHEN** the member opens the registration form for an active event
+- **WHEN** the member opens the registration form for an active event that uses SI cards
 - **THEN** the SI card number field is prefilled with the value from the profile
 - **AND** the member can submit the form immediately without retyping the SI card number
 
@@ -38,9 +38,9 @@ When the registration form opens, the SI card number field SHALL be prefilled wi
 #### Scenario: Registration form has empty SI card number when not in profile
 
 - **GIVEN** an authenticated member has no SI card number recorded in their profile
-- **WHEN** the member opens the registration form for an active event
+- **WHEN** the member opens the registration form for an active event that requires SI cards
 - **THEN** the SI card number field is empty
-- **AND** the member must enter the SI card number manually before submitting
+- **AND** the member must enter the SI card number manually, or ask to rent one where rental is allowed, before submitting
 
 #### Scenario: Member registers for an event with categories
 
@@ -111,6 +111,8 @@ The system SHALL display the list of members registered for an event. Each regis
 
 The registration timestamp SHALL be visible only to the event coordinator (the member assigned as the event's coordinator) and to users with the EVENTS:REGISTRATIONS authority. Other members do not see the registration timestamp column.
 
+When the event offers shared transport, each registration additionally shows whether the member asked to use shared transport. When the event offers shared accommodation, each registration additionally shows whether the member asked to use shared accommodation. These choices are displayed as "Ano"/"Ne" and SHALL be visible to every authenticated member who can view the registration list. When the event does not offer a service, the corresponding choice is not displayed for any registration; when the event offers neither service, no shared-service choice is displayed at all.
+
 The list SHALL be sorted by registration time ascending by default (first-come-first-served order). Users SHALL be able to sort the list by first name, last name, and category by clicking the corresponding column headers. The event coordinator and users with EVENTS:REGISTRATIONS authority SHALL additionally be able to sort by registration time.
 
 #### Scenario: Member views registration list for an event
@@ -152,66 +154,109 @@ The list SHALL be sorted by registration time ascending by default (first-come-f
 - **WHEN** authenticated user views the registration list for an event without categories
 - **THEN** no category column is displayed in the registration list
 
+#### Scenario: Member sees shared service choices for an event offering both services
+
+- **GIVEN** an event with both the shared transport offer and the shared accommodation offer turned on, where some registered members asked for the services and others did not
+- **WHEN** an authenticated club member views the registration list for the event
+- **THEN** every registration row shows "Ano" or "Ne" for shared transport according to that member's choice
+- **AND** every registration row shows "Ano" or "Ne" for shared accommodation according to that member's choice
+
+#### Scenario: Registration list shows shared transport choice only when the event offers shared transport
+
+- **GIVEN** an event with the shared transport offer turned on and the shared accommodation offer turned off
+- **WHEN** an authenticated club member views the registration list for the event
+- **THEN** each registration row shows the member's shared transport choice
+- **AND** no shared accommodation choice is displayed for any registration
+
+#### Scenario: Registration list shows no shared service choices when the event offers none
+
+- **GIVEN** an event with both the shared transport offer and the shared accommodation offer turned off
+- **WHEN** an authenticated club member views the registration list for the event
+- **THEN** no shared transport or shared accommodation choice is displayed for any registration
+
+#### Scenario: Shared service choices are visible regardless of authority
+
+- **GIVEN** an event with the shared accommodation offer turned on where some registered members asked for shared accommodation
+- **WHEN** an authenticated club member without EVENTS:REGISTRATIONS authority who is not the coordinator views the registration list
+- **THEN** the member sees for every registration whether that member asked for shared accommodation
+
 ### Requirement: Generate Accommodation List for Event Registrations
 
-The event coordinator and users with the EVENTS:REGISTRATIONS authority SHALL be able to generate an accommodation list for an event. The list contains, for every member registered for the event, the member's first name, last name, identity card number, identity card validity date, date of birth, and full address.
+The event coordinator and users with the EVENTS:REGISTRATIONS authority SHALL be able to generate an accommodation list for an event that has the shared accommodation offer turned on. The list contains, for every member registered for the event who asked to use shared accommodation, the member's first name, last name, identity card number, identity card validity date, date of birth, and full address. Members who are registered but did not ask for shared accommodation are not on the list.
+
+The "Seznam pro ubytování" action SHALL be offered only when the event has the shared accommodation offer turned on. When the offer is off, the action is not exposed in the event detail page and any direct attempt to open the accommodation list, including the CSV download, is rejected.
 
 The list SHALL be available as a separate page reached from the event detail or from the registration list. The page SHALL be designed for printing (legible black-on-white layout, repeating header on each page) so the coordinator can hand the printout to the accommodation provider.
 
 The page SHALL additionally offer a "Stáhnout CSV" action that downloads the same list as a CSV file, so the coordinator can hand the list to the accommodation provider electronically (by e-mail or as input to the provider's system). The downloaded file SHALL contain the same rows and the same columns as the printable list (first name, last name, identity card number, identity card validity date, date of birth, address), with the address rendered as a single combined column. The CSV SHALL open directly in the Czech locale of MS Excel and SHALL begin with a header row labelling the columns in Czech. The downloaded file SHALL be named so the coordinator can recognise which event it belongs to.
 
-If a registered member has no identity card recorded in their profile, the corresponding cells of the printable list SHALL display the literal text "neuvedeno" so the coordinator can quickly spot incomplete records before printing. In the CSV download the corresponding cells SHALL instead be left empty, so the file is easier to process in the accommodation provider's system.
+If a listed member has no identity card recorded in their profile, the corresponding cells of the printable list SHALL display the literal text "neuvedeno" so the coordinator can quickly spot incomplete records before printing. In the CSV download the corresponding cells SHALL instead be left empty, so the file is easier to process in the accommodation provider's system.
 
 Members without EVENTS:REGISTRATIONS authority who are not the event coordinator SHALL NOT have access to this list — neither through the user interface (the "Seznam pro ubytování" action is not exposed in the event detail page) nor through the API (any request, including the CSV download, is rejected).
 
 #### Scenario: Event coordinator generates the accommodation list
 
-- **GIVEN** an event has registered members and the user is the coordinator of that event
+- **GIVEN** an event has the shared accommodation offer turned on and members who asked for shared accommodation, and the user is the coordinator of that event
 - **WHEN** the coordinator selects the "Seznam pro ubytování" action on the event detail page
-- **THEN** the system displays a printable list of all registered members
+- **THEN** the system displays a printable list of the members who asked for shared accommodation
 - **AND** each row shows first name, last name, identity card number, identity card validity date, date of birth, and address
 - **AND** the page exposes a "Tisknout" action that opens the browser print dialog
 - **AND** the page exposes a "Stáhnout CSV" action
 
+#### Scenario: Accommodation list excludes members who did not choose shared accommodation
+
+- **GIVEN** an event with the shared accommodation offer turned on where some registered members asked for shared accommodation and others did not
+- **WHEN** the coordinator opens the accommodation list
+- **THEN** only the members who asked for shared accommodation appear on the list
+
+#### Scenario: Accommodation list action is hidden when the event does not offer shared accommodation
+
+- **GIVEN** an event with the shared accommodation offer turned off
+- **WHEN** the event coordinator or a user with EVENTS:REGISTRATIONS opens the event detail page
+- **THEN** the "Seznam pro ubytování" action is not displayed
+- **AND** a direct attempt to open the accommodation list or download its CSV is rejected
+
 #### Scenario: User with EVENTS:REGISTRATIONS authority generates the accommodation list for any event
 
 - **GIVEN** the user has the EVENTS:REGISTRATIONS authority
-- **WHEN** the user opens the accommodation list for any event
-- **THEN** the list is rendered with full details for every registered member
+- **AND** the event has the shared accommodation offer turned on
+- **WHEN** the user opens the accommodation list for that event
+- **THEN** the list is rendered with full details for every member who asked for shared accommodation
 
 #### Scenario: Coordinator downloads the accommodation list as CSV
 
-- **GIVEN** an event has registered members and the user is the coordinator or has the EVENTS:REGISTRATIONS authority
+- **GIVEN** an event with the shared accommodation offer turned on has members who asked for shared accommodation and the user is the coordinator or has the EVENTS:REGISTRATIONS authority
 - **WHEN** the user selects the "Stáhnout CSV" action on the accommodation list page
 - **THEN** the browser downloads a CSV file
 - **AND** the file is named after the event so the coordinator can recognise which event it belongs to
 - **AND** the file opens in the Czech locale of MS Excel with correctly displayed Czech characters
 - **AND** the first row contains Czech column labels
-- **AND** each following row contains one registered member with first name, last name, identity card number, identity card validity date, date of birth, and the combined address
+- **AND** each following row contains one member who asked for shared accommodation with first name, last name, identity card number, identity card validity date, date of birth, and the combined address
 
 #### Scenario: Accommodation list shows placeholder for members without identity card data
 
-- **GIVEN** a member registered for the event has no identity card number in their profile
+- **GIVEN** a member on the accommodation list has no identity card number in their profile
 - **WHEN** the printable accommodation list is generated
 - **THEN** the identity card number cell and the identity card validity date cell display "neuvedeno"
 - **AND** other columns display the available data
 
 #### Scenario: CSV download leaves missing values empty
 
-- **GIVEN** a member registered for the event has no identity card number in their profile
+- **GIVEN** a member on the accommodation list has no identity card number in their profile
 - **WHEN** the accommodation list is downloaded as CSV
 - **THEN** the identity card number cell and the identity card validity date cell are empty
 - **AND** other columns contain the available data
 
 #### Scenario: Event coordinator sees the accommodation list action in event detail
 
-- **GIVEN** an event has been assigned a coordinator
+- **GIVEN** an event has been assigned a coordinator and has the shared accommodation offer turned on
 - **WHEN** the event coordinator opens the event detail page
 - **THEN** the "Seznam pro ubytování" action is displayed
 
 #### Scenario: User with EVENTS:REGISTRATIONS authority sees the accommodation list action in event detail
 
-- **WHEN** a user with EVENTS:REGISTRATIONS authority opens any event detail page
+- **GIVEN** an event has the shared accommodation offer turned on
+- **WHEN** a user with EVENTS:REGISTRATIONS authority opens the event detail page
 - **THEN** the "Seznam pro ubytování" action is displayed
 
 #### Scenario: Unauthorized user cannot access the accommodation list
@@ -223,7 +268,7 @@ Members without EVENTS:REGISTRATIONS authority who are not the event coordinator
 
 ### Requirement: View Own Registration
 
-The system SHALL allow members to view their own registration details including their SI card number. Users with the EVENTS:REGISTRATIONS authority SHALL be able to view any member's registration details including their SI card number.
+The system SHALL allow members to view their own registration details including their SI card number. Users with the EVENTS:REGISTRATIONS authority SHALL be able to view any member's registration details including their SI card number. The coordinator of an event SHALL be able to open the registration details of any registration for that event in read-only form, including the member's SI card number (needed to register the member at the event presentation); the coordinator is not offered any action to change the registration.
 
 #### Scenario: Member views their own registration
 
@@ -237,9 +282,16 @@ The system SHALL allow members to view their own registration details including 
 - **WHEN** authenticated user with EVENTS:REGISTRATIONS views a member's registration for an event
 - **THEN** the registration details are shown including the member's SI card number and registration time
 
+#### Scenario: Event coordinator views a member's registration
+
+- **GIVEN** a member is registered for an event coordinated by another member
+- **WHEN** the coordinator opens that member's registration from the event's registrations list
+- **THEN** the registration details are shown including the member's SI card number, category and registration time
+- **AND** no edit or unregister action is offered
+
 #### Scenario: User without EVENTS:REGISTRATIONS cannot view another member's registration
 
-- **WHEN** authenticated user without EVENTS:REGISTRATIONS attempts to view another member's registration details
+- **WHEN** authenticated user without EVENTS:REGISTRATIONS who is not the event coordinator attempts to view another member's registration details
 - **THEN** access is refused
 
 #### Scenario: Own registration page shows not found when not registered
@@ -319,8 +371,8 @@ Members SHALL be able to change their existing event registration (SI card numbe
 #### Scenario: Edit form for an event without categories hides the category field
 
 - **WHEN** the member opens the edit form for an event that defines no categories
-- **THEN** the form shows only the SI card number field
-- **AND** no category selection is offered
+- **THEN** no category selection is offered
+- **AND** the SI card field is shown according to the event's SI policy
 
 #### Scenario: Edit form for an event with categories requires a category
 
@@ -335,7 +387,7 @@ Members SHALL be able to change their existing event registration (SI card numbe
 
 #### Scenario: Submitting an invalid SI card number is rejected
 
-- **WHEN** the member submits the edit form with an SI card number containing non-digits, or shorter than 4 digits, or longer than 8 digits, or blank
+- **WHEN** the member submits the edit form with an SI card number containing non-digits, or shorter than 4 digits, or longer than 8 digits, or blank where the event's SI policy requires one
 - **THEN** the form shows the same validation feedback shown on the registration form (digits only, 4–8 characters, required)
 
 #### Scenario: Editing another member's registration without EVENTS:REGISTRATIONS is not possible
@@ -388,7 +440,7 @@ The system SHALL NOT provide access to the registrations list for events in DRAF
 
 ### Requirement: SI Card Number Validation
 
-The system SHALL validate SI card numbers. A valid SI card number contains only digits and is 4-8 characters long.
+The system SHALL validate SI card numbers whenever one is entered. A valid SI card number contains only digits and is 4-8 characters long. A blank SI card number is rejected only when the event's SI policy requires one and the member does not ask to rent a card.
 
 #### Scenario: Valid SI card number accepted
 
@@ -412,8 +464,14 @@ The system SHALL validate SI card numbers. A valid SI card number contains only 
 
 #### Scenario: Blank SI card number rejected
 
-- **WHEN** member submits registration without entering an SI card number
+- **WHEN** member submits registration without entering an SI card number for an event that requires one, without asking to rent a card
 - **THEN** the form shows an error that the SI card number is required
+
+#### Scenario: Blank SI card number accepted where not required
+
+- **WHEN** member submits registration without entering an SI card number for an event where SI is optional or not used
+- **THEN** the registration is created without an SI card number
+
 ### Requirement: Finance Manager Records Transaction From Registrations List
 
 The system SHALL allow a user with FINANCE:MANAGE authority to record a deposit or a charge on the financial account of any member listed in an event's registrations, directly from that registrations list, without navigating away from the event. The action SHALL open the same unified transaction dialog used elsewhere for recording deposits and charges on a member account, and SHALL prefill the transaction note with the event name so the resulting account history entry identifies the source event. After a successful submission, the user SHALL remain on the registrations list and the dialog SHALL close.
@@ -509,3 +567,303 @@ A registration SHALL stay attached to the category the member selected even when
 - **WHEN** a user sorts the list by category
 - **THEN** registrations without a category are grouped together
 - **AND** the remaining registrations are sorted by their category name
+
+### Requirement: Member Chooses Shared Transport And Shared Accommodation When Registering
+
+When registering for an event, a member SHALL be able to say whether they want to use the event's shared transport and whether they want to use the event's shared accommodation. Each choice is offered only when the event has the matching offer turned on; when an offer is off, the corresponding field is absent from the registration form. Both choices default to "no".
+
+#### Scenario: Registration form offers both choices when the event has both offers on
+
+- **GIVEN** an ACTIVE event with open registrations that has both the shared transport and shared accommodation offers turned on
+- **WHEN** an authenticated member opens the registration form
+- **THEN** the form shows a "Chci využít společnou dopravu" tick box and a "Chci využít společné ubytování" tick box
+- **AND** both are unticked by default
+
+#### Scenario: Member registers and asks for shared accommodation
+
+- **GIVEN** an ACTIVE event with the shared accommodation offer turned on
+- **WHEN** the member ticks "Chci využít společné ubytování" and submits the registration
+- **THEN** the registration is created recording that the member wants shared accommodation
+
+#### Scenario: Registration form hides a choice when the event does not offer it
+
+- **GIVEN** an ACTIVE event with the shared transport offer on and the shared accommodation offer off
+- **WHEN** an authenticated member opens the registration form
+- **THEN** the form shows the "Chci využít společnou dopravu" tick box
+- **AND** no shared accommodation tick box is shown
+
+#### Scenario: Registration form shows neither choice when the event offers nothing
+
+- **GIVEN** an ACTIVE event with both offers off
+- **WHEN** an authenticated member opens the registration form
+- **THEN** the form shows neither a shared transport nor a shared accommodation tick box
+
+#### Scenario: Member registers without ticking either choice
+
+- **GIVEN** an ACTIVE event with both offers turned on
+- **WHEN** the member submits the registration without ticking either box
+- **THEN** the registration is created recording that the member wants neither shared transport nor shared accommodation
+
+### Requirement: Member Edits Their Shared Transport And Shared Accommodation Choices
+
+A member SHALL be able to change their shared transport and shared accommodation choices for an event they are registered for, under the same conditions that allow editing the registration (before the registration deadline and before the event date, for an ACTIVE event). Each choice is editable only when the event has the matching offer turned on. A user with the EVENTS:REGISTRATIONS authority SHALL be able to change these choices on another member's registration under the same conditions.
+
+#### Scenario: Member turns on shared accommodation after registering
+
+- **GIVEN** a member is registered for an ACTIVE event that has the shared accommodation offer turned on
+- **AND** the registration deadline and the event date are still in the future
+- **WHEN** the member edits their registration, ticks "Chci využít společné ubytování" and saves
+- **THEN** the registration now records that the member wants shared accommodation
+- **AND** the event's shared accommodation count on the detail page goes up by one
+
+#### Scenario: Member removes their shared transport choice
+
+- **GIVEN** a member is registered for an ACTIVE event with the shared transport offer on and has previously asked for shared transport
+- **WHEN** the member edits their registration, unticks "Chci využít společnou dopravu" and saves
+- **THEN** the registration no longer records a shared transport request
+
+#### Scenario: Edit form hides a choice the event does not offer
+
+- **GIVEN** a member is registered for an ACTIVE event with the shared accommodation offer off
+- **WHEN** the member opens the edit form for their registration
+- **THEN** no shared accommodation tick box is shown
+
+#### Scenario: Choices cannot be edited after the registration deadline
+
+- **GIVEN** a member is registered for an event whose registration deadline has passed
+- **WHEN** the member views their registration
+- **THEN** no edit action is available and the shared transport and shared accommodation choices cannot be changed
+
+#### Scenario: User with EVENTS:REGISTRATIONS edits another member's choices
+
+- **GIVEN** a user with the EVENTS:REGISTRATIONS authority
+- **AND** an ACTIVE event with the shared transport offer turned on and open editing
+- **WHEN** the user edits another member's registration and changes the shared transport choice
+- **THEN** the other member's registration reflects the new choice
+
+### Requirement: Registration form driven by the registration representation
+
+The registration form (new registration and registration edit) SHALL be built from the affordances and data carried by the registration representation addressed by the link the member follows — the `newRegistration` link of an event for a new registration, the registration's own link for editing. The form SHALL work identically from every place that offers such a link (dashboard, events list, event detail). When a new-registration representation carries no register affordance, the form SHALL show an error and MUST NOT offer a submit action. When the representation of an existing registration carries no edit affordance — the window for editing has closed, or the user may only read it — the registration SHALL be shown read-only as the registration detail, without inputs or a submit action.
+
+#### Scenario: Member opens a new registration form from any entry point
+
+- **WHEN** a member follows the new-registration link of an event with open registrations — from the dashboard widget, the events list, or the event detail page
+- **THEN** the same registration form opens with the member's name context, the event context, and — where the event uses SI cards — an SI card number prefilled from their profile
+- **AND** the form submits as a new registration
+
+#### Scenario: New registration representation does not offer editing
+
+- **WHEN** a member opens the new registration form via the event's new-registration link
+- **THEN** the form is driven by the register affordance of the returned registration defaults
+- **AND** no edit or unregister affordance is offered by that response
+
+#### Scenario: Registration form without an available register action shows an error
+
+- **WHEN** a member opens the registration form for an event whose registrations are closed
+- **THEN** the form shows an error instead of the submit action
+
+#### Scenario: Blocked member does not receive the register action
+
+- **GIVEN** a member is blocked from registering by a sanction
+- **WHEN** the member opens the new registration form via the event's new-registration link
+- **THEN** the form shows an error instead of the submit action
+
+#### Scenario: Member edits their registration from the registration link
+
+- **WHEN** a member follows the link of their existing registration to edit it
+- **THEN** the form opens in edit mode showing the member chip with their name, the category and the current SI card number and rental request as the event's SI policy offers them
+- **AND** the form submits as an update of the existing registration
+
+#### Scenario: Registration that can no longer be edited opens as a read-only detail
+
+- **GIVEN** a member is registered for an event whose registration deadline has passed
+- **WHEN** the member clicks "Detail" on their row in the registrations list
+- **THEN** the registration is shown with its category, SI card number, rental request and notes
+- **AND** no input and no submit action is offered
+
+#### Scenario: Event coordinator opens a registration as a read-only detail
+
+- **WHEN** the coordinator of an event clicks "Detail" on a member's row in the registrations list
+- **THEN** the member's registration is shown read-only
+- **AND** no edit or unregister action is offered
+
+#### Scenario: Registration form for an event without SI does not send the profile SI card number
+
+- **GIVEN** a member has an SI card number in their profile
+- **WHEN** the member registers for an event that does not use SI cards
+- **THEN** the registration is created without an SI card number
+
+### Requirement: Member Adds Notes To Their Registration
+
+When registering for an event and when editing a registration, a member SHALL be able to fill in two optional free-text notes: "Interní poznámka", meant only for the club, and "Poznámka do ORIS", meant for the event organiser's registration in ORIS. Both notes are empty by default. The notes follow the same timing rules as the rest of the registration. A user with EVENTS:REGISTRATIONS SHALL be able to fill in and change both notes on any member's registration.
+
+#### Scenario: Registration form offers both notes
+
+- **WHEN** an authenticated member opens the registration form for an ACTIVE event with open registrations
+- **THEN** the form shows an empty "Interní poznámka" field and an empty "Poznámka do ORIS" field
+- **AND** the member can submit the form without filling in either note
+
+#### Scenario: Member registers with notes
+
+- **WHEN** the member fills in "Interní poznámka" and "Poznámka do ORIS" on the registration form and submits it
+- **THEN** the registration is created with both notes
+- **AND** the member sees both notes when they open their registration
+
+#### Scenario: Member changes a note on their registration
+
+- **GIVEN** a member is registered for an event with an open registration window
+- **WHEN** the member clicks "Upravit", changes the "Poznámka do ORIS" text and saves
+- **THEN** the registration shows the new ORIS note
+- **AND** the internal note and the registration time are unchanged
+
+#### Scenario: Member clears a note
+
+- **GIVEN** a member's registration has an internal note
+- **WHEN** the member edits the registration, empties the "Interní poznámka" field and saves
+- **THEN** the registration has no internal note
+
+#### Scenario: Notes cannot be changed after the registration deadline
+
+- **GIVEN** a member is registered for an event whose registration deadline has passed
+- **WHEN** the member opens the detail of their registration from the registrations list
+- **THEN** both notes are shown read-only
+- **AND** no edit action is available to change them
+
+#### Scenario: User with EVENTS:REGISTRATIONS edits another member's notes
+
+- **GIVEN** a user with EVENTS:REGISTRATIONS and an ACTIVE event with an open registration window
+- **WHEN** the user opens another member's registration, clicks "Upravit", changes both notes and saves
+- **THEN** the other member's registration shows the new notes
+- **AND** the member sees the new notes when they next open their registration
+
+### Requirement: Registration Notes Are Shown Only On The Registration Detail
+
+Both notes SHALL be shown only on the registration detail and in the registration edit form, never in the registrations list. The notes SHALL be visible to the registered member, to users with EVENTS:REGISTRATIONS and to the event's coordinator. The coordinator sees them read-only. No other member SHALL see another member's notes.
+
+#### Scenario: Registrations list does not show notes
+
+- **GIVEN** registrations of an event carry notes
+- **WHEN** any user, including the event coordinator and a user with EVENTS:REGISTRATIONS, views the registrations list of the event
+- **THEN** no note is shown in the list
+
+#### Scenario: Event coordinator reads the notes of a registration
+
+- **GIVEN** a member's registration for an event carries both notes
+- **WHEN** the coordinator of that event opens the member's registration from the registrations list
+- **THEN** the registration detail shows the internal note and the ORIS note
+- **AND** no action to edit the notes or the registration is offered to the coordinator
+
+#### Scenario: Other members do not see notes
+
+- **WHEN** a member without EVENTS:REGISTRATIONS who is not the event coordinator views the registrations of an event
+- **THEN** they cannot open another member's registration detail
+- **AND** they see no note of any other member
+
+### Requirement: Registration Note Validation
+
+Each note SHALL be plain text of at most 255 characters. A note containing only whitespace SHALL be treated as no note.
+
+#### Scenario: Note input is limited to 255 characters
+
+- **WHEN** a member types or pastes a note into the registration form or the edit form
+- **THEN** the form accepts at most 255 characters in each note and shows how many characters are used out of 255
+
+#### Scenario: Note that is too long is rejected
+
+- **WHEN** a registration or registration change with a note longer than 255 characters is submitted
+- **THEN** the registration is not created or changed
+
+#### Scenario: Note with only whitespace is stored as no note
+
+- **WHEN** a member submits the registration form with "Interní poznámka" containing only spaces
+- **THEN** the registration is created without an internal note
+
+### Requirement: Registration Follows The Event's SI Policy
+
+The registration form and the edit form SHALL follow the event's SI policy. When the event does not use SI cards, no SI card field is shown. When SI is optional, the SI card field is shown but may be left empty. When SI is required, the member MUST enter an SI card number, unless the event allows rental and the member asks to rent one. Where rental is allowed, the form offers a "Chci si půjčit čip" tick box, unticked by default.
+
+#### Scenario: Registration form for an event that does not use SI
+
+- **GIVEN** an ACTIVE event with open registrations that does not use SI cards
+- **WHEN** a member opens the registration form
+- **THEN** no SI card field and no rental tick box is shown
+- **AND** the member can register without an SI card number
+
+#### Scenario: Member registers without an SI card for an event where SI is optional
+
+- **GIVEN** an ACTIVE event where SI cards are optional
+- **WHEN** the member leaves the SI card field empty and submits the registration form
+- **THEN** the registration is created without an SI card number
+
+#### Scenario: Member rents an SI card instead of entering a number
+
+- **GIVEN** an ACTIVE event that requires SI cards and allows rental
+- **WHEN** the member ticks "Chci si půjčit čip", leaves the SI card field empty and submits
+- **THEN** the registration is created recording that the member wants to rent an SI card
+
+#### Scenario: Member enters an SI card number and asks for rental
+
+- **GIVEN** an ACTIVE event that allows SI card rental
+- **WHEN** the member enters an SI card number and also ticks "Chci si půjčit čip"
+- **THEN** the registration is created with the SI card number and the rental request
+
+#### Scenario: Required SI card without rental cannot be skipped
+
+- **GIVEN** an ACTIVE event that requires SI cards and does not allow rental
+- **WHEN** the member submits the registration form with an empty SI card field
+- **THEN** the form shows an error that the SI card number is required
+
+#### Scenario: Required SI card with rental allowed but not asked for
+
+- **GIVEN** an ACTIVE event that requires SI cards and allows rental
+- **WHEN** the member submits the registration form with an empty SI card field and without ticking "Chci si půjčit čip"
+- **THEN** the form shows an error that an SI card number is required unless the member rents one
+
+#### Scenario: Rental tick box is absent when rental is not allowed
+
+- **GIVEN** an ACTIVE event that uses SI cards and does not allow rental
+- **WHEN** a member opens the registration form or the edit form
+- **THEN** no "Chci si půjčit čip" tick box is shown
+
+#### Scenario: Member changes their rental request
+
+- **GIVEN** a member is registered with a rental request for an event that allows rental, with an open registration window
+- **WHEN** the member edits the registration, unticks "Chci si půjčit čip", enters their SI card number and saves
+- **THEN** the registration records the SI card number and no rental request
+
+#### Scenario: Editing a registration that does not fit the SI policy requires fixing the SI values
+
+- **GIVEN** a member is registered without an SI card number for an event that has since been changed to require SI cards without rental
+- **WHEN** the member edits the registration, changes only the category and saves
+- **THEN** the form shows an error that the SI card number is required
+- **AND** the registration is not changed
+- **WHEN** the member enters a valid SI card number and saves
+- **THEN** the registration is updated with the new category and the SI card number
+
+#### Scenario: Registration with a rental request after rental was disallowed
+
+- **GIVEN** a member is registered without an SI card number and with a rental request, and the event has since been changed to require SI cards without rental
+- **WHEN** the member edits the registration, changes only the category and saves
+- **THEN** the form shows an error that the SI card number is required
+- **WHEN** the member enters a valid SI card number and saves
+- **THEN** the registration is updated with the new category and the SI card number
+- **AND** the recorded rental request is kept
+
+#### Scenario: Changing the SI values of a registration must fit the policy
+
+- **GIVEN** a member is registered with an SI card number for an event that requires SI cards without rental
+- **WHEN** the member edits the registration, clears the SI card field and saves
+- **THEN** the form shows an error that the SI card number is required
+- **AND** the registration keeps its SI card number
+
+#### Scenario: Values the event does not offer are kept on edit
+
+- **GIVEN** a member registered with an SI card number and a rental request, and the event has since been changed to not use SI cards
+- **WHEN** the member edits the registration and saves
+- **THEN** the SI card number and the rental request recorded on the registration are kept
+
+#### Scenario: Registration detail shows the rental request
+
+- **GIVEN** a member's registration records a rental request
+- **WHEN** the member, or a user with EVENTS:REGISTRATIONS, opens the registration detail
+- **THEN** the detail shows that the member wants to rent an SI card

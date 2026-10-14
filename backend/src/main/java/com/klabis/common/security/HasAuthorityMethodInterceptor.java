@@ -1,11 +1,8 @@
 package com.klabis.common.security;
 
-import com.klabis.common.users.Authority;
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.users.HasAuthority;
-import com.klabis.common.security.fieldsecurity.OwnerId;
 import com.klabis.common.security.fieldsecurity.OwnerVisible;
-import com.klabis.common.security.fieldsecurity.OwnershipResolver;
-import com.klabis.common.security.fieldsecurity.SecuritySpelEvaluator;
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInvocation;
 import org.springframework.aop.ClassFilter;
@@ -17,13 +14,11 @@ import org.springframework.security.authorization.method.AuthorizationAdvisor;
 import org.springframework.security.authorization.method.AuthorizationInterceptorsOrder;
 import org.springframework.security.authorization.method.HandleAuthorizationDenied;
 import org.springframework.security.authorization.method.MethodAuthorizationDeniedHandler;
-import org.springframework.beans.BeansException;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.util.function.SingletonSupplier;
 
 import java.lang.reflect.Method;
+import java.util.function.Supplier;
 
 /**
  * Spring Security {@link AuthorizationAdvisor} that enforces {@link HasAuthority} annotations.
@@ -32,30 +27,34 @@ import java.lang.reflect.Method;
  * class annotation) but integrates with {@code AuthorizationAdvisorProxyFactory}, enabling
  * field-level authorization on response DTOs in addition to bean-level method security.
  * <p>
- * Also handles {@link OwnerVisible} methods: if the authority check fails but the method is
- * annotated with {@link OwnerVisible}, ownership is checked via the parameter annotated
- * with {@link OwnerId}. Access is granted if either the authority check or the ownership
- * check passes.
+ * The decision itself is made by {@link AuthorizationEvaluator#canInvoke}, which also covers
+ * {@link OwnerVisible} methods and authorities held over just the target identified by a
+ * {@link com.klabis.common.authorization.TargetId} parameter.
  * <p>
  * Registered as a {@code @Bean} so {@code AuthorizationAdvisorProxyFactory} auto-discovers it.
  */
-public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, ApplicationContextAware {
+public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor {
 
-    private ApplicationContext applicationContext;
-    private volatile OwnershipResolver ownershipResolver;
+    private final BeanFactory beanFactory;
+    private final Supplier<AuthorizationEvaluator> evaluator;
 
     private static final AuthorizationResult DENY = () -> false;
+
+    private static final String APPLICATION_PACKAGE_PREFIX = "com.klabis.";
 
     /**
      * Matches methods annotated with {@link HasAuthority} or {@link OwnerVisible} on the class
      * itself, OR on any interface it implements — {@link org.springframework.aop.support.annotation.AnnotationMatchingPointcut}
      * only looks at the target class/method directly and misses annotations declared on a
      * generated OpenAPI {@code *Api} interface that the controller implements.
+     * <p>
+     * The class filter limits matching to application classes: the interface-aware lookup is
+     * expensive and running it for every method of every framework bean dominated context startup.
      */
     private static final Pointcut POINTCUT = new Pointcut() {
         @Override
         public ClassFilter getClassFilter() {
-            return ClassFilter.TRUE;
+            return clazz -> clazz.getName().startsWith(APPLICATION_PACKAGE_PREFIX);
         }
 
         @Override
@@ -63,9 +62,7 @@ public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, Appl
             return new MethodMatcher() {
                 @Override
                 public boolean matches(Method method, Class<?> targetClass) {
-                    return MethodSecurityAnnotations.findMethodAnnotation(method, targetClass, HasAuthority.class) != null
-                           || MethodSecurityAnnotations.findMethodAnnotation(method, targetClass, OwnerVisible.class) != null
-                           || MethodSecurityAnnotations.findClassAnnotation(targetClass, HasAuthority.class) != null;
+                    return AuthorizationEvaluator.isGuarded(method, targetClass);
                 }
 
                 @Override
@@ -81,28 +78,22 @@ public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, Appl
         }
     };
 
+    /**
+     * The evaluator is resolved on first use because this advisor is created while the proxy infrastructure
+     * is being set up, before the evaluator's own dependencies are available.
+     */
+    public HasAuthorityMethodInterceptor(BeanFactory beanFactory) {
+        this.beanFactory = beanFactory;
+        this.evaluator = SingletonSupplier.of(() -> beanFactory.getBean(AuthorizationEvaluator.class));
+    }
+
     @Override
     public Object invoke(MethodInvocation invocation) throws Throwable {
         Method method = invocation.getMethod();
         Object target = invocation.getThis();
         Class<?> targetClass = target != null ? target.getClass() : method.getDeclaringClass();
-        Authority requiredAuthority = resolveAuthority(method, targetClass);
-        boolean isOwnerVisible = MethodSecurityAnnotations.findMethodAnnotation(method, targetClass, OwnerVisible.class) != null;
 
-        if (requiredAuthority == null && !isOwnerVisible) {
-            return invocation.proceed();
-        }
-
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-
-        boolean authorityGranted = requiredAuthority != null
-                && SecuritySpelEvaluator.hasAuthority(authentication, requiredAuthority);
-
-        if (authorityGranted) {
-            return invocation.proceed();
-        }
-
-        if (isOwnerVisible && checkOwnership(method, targetClass, invocation.getArguments(), authentication)) {
+        if (evaluator.get().canInvoke(method, targetClass, invocation.getArguments())) {
             return invocation.proceed();
         }
 
@@ -112,32 +103,8 @@ public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, Appl
             return handler.handleDeniedInvocation(invocation, DENY);
         }
 
-        String denyReason = requiredAuthority != null
-                ? "Access denied. Required authority: " + requiredAuthority.getValue()
-                : "Access denied. Ownership required.";
-        throw new AccessDeniedException(denyReason);
-    }
-
-    private boolean checkOwnership(Method method, Class<?> targetClass, Object[] arguments, Authentication authentication) {
-        OwnershipResolver resolver = getOwnershipResolver();
-        if (resolver == null) {
-            return false;
-        }
-        int ownerIdIndex = MethodSecurityAnnotations.findAnnotatedParameterIndex(method, targetClass, OwnerId.class);
-        if (ownerIdIndex < 0) {
-            return false;
-        }
-        return resolver.isOwner(arguments[ownerIdIndex], authentication);
-    }
-
-    private OwnershipResolver getOwnershipResolver() {
-        if (ownershipResolver == null && applicationContext != null) {
-            try {
-                ownershipResolver = applicationContext.getBean(OwnershipResolver.class);
-            } catch (Exception ignored) {
-            }
-        }
-        return ownershipResolver;
+        throw new AccessDeniedException(
+                "Access denied. Required: " + evaluator.get().describeRequirement(method, targetClass));
     }
 
     @Override
@@ -155,18 +122,6 @@ public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, Appl
         return AuthorizationInterceptorsOrder.PRE_AUTHORIZE.getOrder() + 1;
     }
 
-
-
-    private Authority resolveAuthority(Method method, Class<?> targetClass) {
-        HasAuthority methodAnnotation = MethodSecurityAnnotations.findMethodAnnotation(method, targetClass, HasAuthority.class);
-        if (methodAnnotation != null) {
-            return methodAnnotation.value();
-        }
-
-        HasAuthority classAnnotation = MethodSecurityAnnotations.findClassAnnotation(targetClass, HasAuthority.class);
-        return classAnnotation != null ? classAnnotation.value() : null;
-    }
-
     private HandleAuthorizationDenied resolveDeniedHandler(Method method, Class<?> targetClass) {
         HandleAuthorizationDenied methodLevel = MethodSecurityAnnotations.findMethodAnnotation(method, targetClass, HandleAuthorizationDenied.class);
         if (methodLevel != null) {
@@ -175,23 +130,15 @@ public class HasAuthorityMethodInterceptor implements AuthorizationAdvisor, Appl
         return MethodSecurityAnnotations.findClassAnnotation(targetClass, HandleAuthorizationDenied.class);
     }
 
-    @Override
-    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
-        this.applicationContext = applicationContext;
+    private <H extends MethodAuthorizationDeniedHandler> H resolveHandler(Class<H> handlerClass) {
+        return beanFactory.getBeanProvider(handlerClass).getIfAvailable(() -> instantiate(handlerClass));
     }
 
-    private MethodAuthorizationDeniedHandler resolveHandler(Class<? extends MethodAuthorizationDeniedHandler> handlerClass) {
-        if (applicationContext != null) {
-            try {
-                return applicationContext.getBean(handlerClass);
-            } catch (BeansException ignored) {
-            }
-        }
+    private static <H extends MethodAuthorizationDeniedHandler> H instantiate(Class<H> handlerClass) {
         try {
             return handlerClass.getDeclaredConstructor().newInstance();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to resolve MethodAuthorizationDeniedHandler: " + handlerClass, e);
         }
     }
-
 }

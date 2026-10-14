@@ -3,63 +3,62 @@ package com.klabis.common.security.fieldsecurity;
 import tools.jackson.databind.BeanDescription;
 import tools.jackson.databind.SerializationConfig;
 import tools.jackson.databind.ser.BeanPropertyWriter;
+import tools.jackson.databind.ser.BeanSerializerBuilder;
 import tools.jackson.databind.ser.ValueSerializerModifier;
+import com.klabis.common.authorization.AuthorizationEvaluator;
 import com.klabis.common.users.HasAuthority;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.core.convert.ConversionService;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authorization.method.HandleAuthorizationDenied;
+import org.springframework.util.function.SingletonSupplier;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
-import java.util.Arrays;
 import java.util.List;
-import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * Jackson {@link ValueSerializerModifier} that wraps {@link BeanPropertyWriter} instances
- * for record components annotated with {@link PreAuthorize}, {@link HasAuthority}, or
+ * for record components annotated with {@link HasAuthority} or
  * {@link OwnerVisible}. Authorization is evaluated during serialization — no interface or
  * proxy needed.
  * <p>
- * Uses {@link ObjectProvider} to allow lazy resolution of {@link OwnershipResolver} and
- * {@link ConversionService}, breaking the circular dependency that arises from Jackson
- * initialization ordering.
+ * Runs from {@link #updateBuilder}, not {@link #changeProperties}. Jackson applies every
+ * registered modifier's {@code changeProperties} first (in registration order — which Spring
+ * does not let us control) and only afterwards calls every modifier's {@code updateBuilder}
+ * with the fully-resolved property list. A {@code JsonNullable}-typed property (from
+ * {@code org.openapitools:jackson-databind-nullable}) is replaced by that library's own
+ * {@code changeProperties}, and since {@link BeanPropertyWriter}'s copy constructor copies
+ * state rather than composing a delegate, whichever modifier's {@code changeProperties} runs
+ * last wins outright — silently discarding a {@link SecuredBeanPropertyWriter} installed by an
+ * earlier {@code changeProperties} call. Wrapping in {@code updateBuilder} instead means we
+ * always see, and wrap, whatever writer survived that race, regardless of module registration
+ * order.
+ * <p>
+ * Decisions are delegated to {@link AuthorizationEvaluator}, resolved lazily through an {@link ObjectProvider}
+ * because it is not yet available while Jackson is being initialized.
  */
 class FieldSecurityBeanSerializerModifier extends ValueSerializerModifier {
 
-    private static final Logger log = LoggerFactory.getLogger(FieldSecurityBeanSerializerModifier.class);
+    private final Supplier<AuthorizationEvaluator> evaluator;
 
-    private final ObjectProvider<OwnershipResolver> ownershipResolverProvider;
-    private final ObjectProvider<ConversionService> conversionServiceProvider;
-
-    FieldSecurityBeanSerializerModifier(
-            ObjectProvider<OwnershipResolver> ownershipResolverProvider,
-            ObjectProvider<ConversionService> conversionServiceProvider) {
-        this.ownershipResolverProvider = ownershipResolverProvider;
-        this.conversionServiceProvider = conversionServiceProvider;
+    FieldSecurityBeanSerializerModifier(ObjectProvider<AuthorizationEvaluator> evaluatorProvider) {
+        this.evaluator = SingletonSupplier.of(() -> evaluatorProvider.getObject());
     }
 
     @Override
-    public List<BeanPropertyWriter> changeProperties(
+    public BeanSerializerBuilder updateBuilder(
             SerializationConfig config,
             BeanDescription.Supplier beanDescSupplier,
-            List<BeanPropertyWriter> beanProperties) {
+            BeanSerializerBuilder builder) {
 
         Class<?> beanClass = beanDescSupplier.get().getBeanClass();
         if (!beanClass.isRecord()) {
-            return beanProperties;
+            return builder;
         }
 
         RecordComponent[] recordComponents = beanClass.getRecordComponents();
-        boolean anyOwnerVisible = hasAnyOwnerVisible(recordComponents);
 
-        ConversionService conversionService = anyOwnerVisible ? conversionServiceProvider.getIfAvailable() : null;
-        OwnershipResolver ownershipResolver = anyOwnerVisible ? ownershipResolverProvider.getIfAvailable() : null;
-        Method ownerIdAccessor = anyOwnerVisible ? resolveOwnerIdAccessor(beanClass, recordComponents, conversionService) : null;
-
+        List<BeanPropertyWriter> beanProperties = builder.getProperties();
         for (int i = 0; i < beanProperties.size(); i++) {
             BeanPropertyWriter writer = beanProperties.get(i);
             RecordComponent component = findMatchingComponent(writer.getName(), recordComponents);
@@ -68,57 +67,16 @@ class FieldSecurityBeanSerializerModifier extends ValueSerializerModifier {
             }
 
             Method accessor = component.getAccessor();
-            PreAuthorize preAuthorize = accessor.getAnnotation(PreAuthorize.class);
-            HasAuthority hasAuthority = accessor.getAnnotation(HasAuthority.class);
-            boolean ownerVisible = accessor.getAnnotation(OwnerVisible.class) != null;
-
-            if (preAuthorize == null && hasAuthority == null && !ownerVisible) {
+            if (!AuthorizationEvaluator.isSecured(accessor)) {
                 continue;
             }
 
             HandleAuthorizationDenied deniedHandler = resolveDeniedHandler(accessor, beanClass);
-            beanProperties.set(i, new SecuredBeanPropertyWriter(
-                    writer, preAuthorize, hasAuthority, deniedHandler, accessor,
-                    ownerVisible, ownerIdAccessor, ownershipResolver));
+            beanProperties.set(i, new SecuredBeanPropertyWriter(writer, accessor, deniedHandler, evaluator));
         }
+        builder.setProperties(beanProperties);
 
-        return beanProperties;
-    }
-
-    private boolean hasAnyOwnerVisible(RecordComponent[] components) {
-        for (RecordComponent component : components) {
-            if (component.getAccessor().getAnnotation(OwnerVisible.class) != null) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private Method resolveOwnerIdAccessor(Class<?> beanClass, RecordComponent[] components, ConversionService conversionService) {
-        // Prefer explicit @OwnerId annotation
-        for (RecordComponent component : components) {
-            if (component.getAccessor().getAnnotation(OwnerId.class) != null) {
-                return component.getAccessor();
-            }
-        }
-
-        if (conversionService == null) {
-            log.warn("Cannot resolve owner ID accessor for {}: ConversionService not available.", beanClass.getSimpleName());
-            return null;
-        }
-
-        // Fall back to single component whose type can be converted to UUID
-        List<RecordComponent> candidates = Arrays.stream(components)
-                .filter(c -> conversionService.canConvert(c.getType(), UUID.class))
-                .toList();
-
-        if (candidates.size() == 1) {
-            return candidates.get(0).getAccessor();
-        }
-
-        log.warn("Cannot resolve owner ID accessor for {}: found {} UUID-convertible candidates. "
-                + "Annotate the owner field with @OwnerId.", beanClass.getSimpleName(), candidates.size());
-        return null;
+        return builder;
     }
 
     private RecordComponent findMatchingComponent(String propertyName, RecordComponent[] components) {

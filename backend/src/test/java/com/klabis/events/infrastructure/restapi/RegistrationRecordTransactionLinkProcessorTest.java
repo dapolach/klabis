@@ -1,5 +1,6 @@
 package com.klabis.events.infrastructure.restapi;
 
+import com.klabis.common.SecurityContextAuthorizationEvaluator;
 import com.klabis.finance.application.FinanceAccountLinkSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -9,10 +10,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.security.core.Authentication;
+import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.time.Instant;
@@ -22,11 +22,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-@DisplayName("RegistrationRecordTransactionLinkProcessor Unit Tests")
+@DisplayName("RegistrationRecordTransactionLinkProcessor Unit Tests (branches not reachable from a controller response; the rest is covered in EventRegistrationControllerTest)")
 class RegistrationRecordTransactionLinkProcessorTest {
 
     @Mock
@@ -36,37 +34,8 @@ class RegistrationRecordTransactionLinkProcessorTest {
 
     @BeforeEach
     void setUp() {
-        testedSubject = new RegistrationRecordTransactionLinkProcessor(financeAccountLinkSupport);
+        testedSubject = new RegistrationRecordTransactionLinkProcessor(financeAccountLinkSupport, SecurityContextAuthorizationEvaluator.create());
         SecurityContextHolder.clearContext();
-    }
-
-    @Test
-    @DisplayName("adds recordTransaction link pointing to member account when caller has FINANCE:MANAGE")
-    void shouldAddRecordTransactionLinkWhenCallerHasFinanceManage() {
-        UUID memberUuid = UUID.randomUUID();
-        EntityModel<RegistrationSummaryDto> model = modelFor(memberUuid);
-        when(financeAccountLinkSupport.accountLink(memberUuid))
-                .thenReturn(Optional.of(Link.of("/api/members/" + memberUuid + "/account", "account")));
-
-        mockSecurityContext(List.of(new SimpleGrantedAuthority("FINANCE:MANAGE")));
-
-        EntityModel<RegistrationSummaryDto> result = testedSubject.process(model);
-
-        assertThat(result.getLink("recordTransaction")).isPresent();
-        assertThat(result.getLink("recordTransaction").get().getHref())
-                .contains("/api/members/" + memberUuid + "/account");
-    }
-
-    @Test
-    @DisplayName("does not add recordTransaction link when caller lacks FINANCE:MANAGE")
-    void shouldNotAddLinkWhenCallerLacksFinanceManage() {
-        EntityModel<RegistrationSummaryDto> model = modelFor(UUID.randomUUID());
-
-        mockSecurityContext(List.of(new SimpleGrantedAuthority("MEMBERS:READ")));
-
-        EntityModel<RegistrationSummaryDto> result = testedSubject.process(model);
-
-        assertThat(result.getLink("recordTransaction")).isEmpty();
     }
 
     @Test
@@ -88,7 +57,7 @@ class RegistrationRecordTransactionLinkProcessorTest {
                 .firstName("John")
                 .lastName("Doe")
                 .registrationTime(Instant.now())
-                .coordinators(List.of())
+                .eventId(UUID.randomUUID())
                 .build();
         EntityModel<RegistrationSummaryDto> model = EntityModel.of(dto);
 
@@ -105,19 +74,13 @@ class RegistrationRecordTransactionLinkProcessorTest {
                 .lastName("Novák")
                 .category(EventCategoryDtoBuilder.builder().name("M21").build())
                 .registrationTime(Instant.now())
-                .coordinators(List.of())
+                .eventId(UUID.randomUUID())
                 .registeredMemberId(memberUuid)
                 .build();
         return EntityModel.of(dto);
     }
 
     private void mockSecurityContext(Collection<? extends GrantedAuthority> authorities) {
-        Authentication authenticationMock = mock(Authentication.class);
-        when(authenticationMock.getAuthorities()).thenAnswer(invocation -> authorities);
-
-        SecurityContext securityContextMock = mock(SecurityContext.class);
-        when(securityContextMock.getAuthentication()).thenReturn(authenticationMock);
-
-        SecurityContextHolder.setContext(securityContextMock);
+        SecurityContextHolder.getContext().setAuthentication(new TestingAuthenticationToken("user", "pw", List.copyOf(authorities)));
     }
 }

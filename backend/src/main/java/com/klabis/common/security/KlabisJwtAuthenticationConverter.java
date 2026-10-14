@@ -1,20 +1,23 @@
 package com.klabis.common.security;
 
+import com.klabis.common.authorization.AuthorizationSnapshot;
 import com.klabis.common.users.UserId;
 import org.springframework.core.convert.converter.Converter;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 
-import java.util.Collection;
 import java.util.UUID;
+import java.util.function.Function;
 
 /**
  * Converts JWT tokens into KlabisJwtAuthenticationToken with strongly-typed UserId.
  * <p>
  * Extracts user_id claim from JWT and creates KlabisJwtAuthenticationToken.
- * Authorities are extracted using the standard JwtGrantedAuthoritiesConverter.
+ * The permissions of a user token come from a snapshot the token loads on demand, never from the
+ * token itself, so revoked or granted permissions apply without a new login. Tokens without {@code user_id}
+ * (machine-to-machine {@code client_credentials}) keep the authorities carried by the token, extracted
+ * with the standard JwtGrantedAuthoritiesConverter.
  * Account-status validation (suspended/deactivated users) is handled separately
  * by {@link AccountStatusValidationFilter} after JWT authentication.
  * <p>
@@ -22,51 +25,31 @@ import java.util.UUID;
  * - sub: username (registration number) - standard JWT subject claim
  * - user_id: UUID of the user - custom claim for type-safe access
  * - member_id: UUID of the member (optional) - custom claim if user has Member profile
- * - authorities: array of authority strings - for authorization
+ * - authorities: array of authority strings - read for machine-to-machine tokens only
  */
 public class KlabisJwtAuthenticationConverter implements Converter<Jwt, JwtAuthenticationToken> {
 
     private final JwtGrantedAuthoritiesConverter authoritiesConverter;
+    private final Function<UserId, AuthorizationSnapshot> snapshotLoader;
 
-    public KlabisJwtAuthenticationConverter() {
+    public KlabisJwtAuthenticationConverter(Function<UserId, AuthorizationSnapshot> snapshotLoader) {
+        this.snapshotLoader = snapshotLoader;
         this.authoritiesConverter = new JwtGrantedAuthoritiesConverter();
         this.authoritiesConverter.setAuthoritiesClaimName("authorities");
         this.authoritiesConverter.setAuthorityPrefix("");
     }
 
-    /**
-     * Sets the authorities claim name in the JWT.
-     * Default is "authorities".
-     *
-     * @param authoritiesClaimName the claim name containing authorities
-     */
-    public void setAuthoritiesClaimName(String authoritiesClaimName) {
-        this.authoritiesConverter.setAuthoritiesClaimName(authoritiesClaimName);
-    }
-
-    /**
-     * Sets the authority prefix.
-     * Default is empty string (no prefix).
-     *
-     * @param authorityPrefix the prefix to add to authorities
-     */
-    public void setAuthorityPrefix(String authorityPrefix) {
-        this.authoritiesConverter.setAuthorityPrefix(authorityPrefix);
-    }
-
     @Override
     public JwtAuthenticationToken convert(Jwt jwt) {
-        Collection<? extends GrantedAuthority> authorities = authoritiesConverter.convert(jwt);
-
         String userIdClaim = jwt.getClaim("user_id");
         if (userIdClaim == null) {
-            return new JwtAuthenticationToken(jwt, authorities);
+            return new JwtAuthenticationToken(jwt, authoritiesConverter.convert(jwt));
         }
 
         UserId userId = extractUserId(jwt);
         UUID memberIdUuid = extractMemberIdUuid(jwt);
 
-        return new KlabisJwtAuthenticationToken(jwt, userId, memberIdUuid, authorities);
+        return new KlabisJwtAuthenticationToken(jwt, userId, memberIdUuid, () -> snapshotLoader.apply(userId));
     }
 
     /**

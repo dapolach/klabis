@@ -4,7 +4,7 @@ import {useMediaQuery} from '../hooks'
 import {Alert, Button, Spinner, Toast} from '../components/UI'
 import {LogoutIcon} from '../components/UI/icons'
 import {ThemeToggle} from '../components/ThemeToggle/ThemeToggle'
-import {AdminToggle} from '../components/AdminToggle/AdminToggle'
+import {RawDataViewToggle} from '../components/AdminToggle/RawDataViewToggle.tsx'
 import type {AuthUserDetails} from '../contexts/authContext'
 import {useAuth} from '../contexts/authContext'
 import {useRootNavigation} from '../hooks/useRootNavigation'
@@ -16,6 +16,7 @@ import {labels} from '../localization'
 import type {LucideIcon} from 'lucide-react'
 import {
     Banknote,
+    BookOpen,
     Calendar,
     Dumbbell,
     Heart,
@@ -36,9 +37,10 @@ const navIcons: Record<string, LucideIcon> = {
     members: Users,
     groups: UsersRound,
     'training-groups': Dumbbell,
-    'family-groups': Heart,
+    legalGuardianGroups: Heart,
     'category-presets': Tags,
     'event-types': ListChecks,
+    disciplines: BookOpen,
     account: Banknote,
     admin: LayoutDashboard,
 }
@@ -74,6 +76,7 @@ const Layout = () => {
     const {data: menuItems = [], isLoading: menuLoading, error: menuError} = useRootNavigation()
     const mainItems = menuItems.filter(item => item.section === 'main')
     const adminItems = menuItems.filter(item => item.section === 'admin')
+    const profileHref = menuItems.find(item => item.rel === 'profile')?.href
 
     useEffect(() => {
         if (isAuthenticated) {
@@ -88,8 +91,8 @@ const Layout = () => {
     }
 
     const handleUserNameClick = () => {
-        if (userDetails?.memberId) {
-            navigate(`members/${userDetails.memberId}`)
+        if (profileHref) {
+            navigate(profileHref)
         }
     }
 
@@ -125,7 +128,7 @@ const Layout = () => {
                         {/* User name/info */}
                         {userDetails && (
                             userDetails.firstName && userDetails.lastName ? (
-                                userDetails.memberId ? (
+                                profileHref ? (
                                     <Button
                                         variant="ghost"
                                         size="sm"
@@ -152,8 +155,8 @@ const Layout = () => {
                         {/* Theme toggle */}
                         <ThemeToggle className="border border-zinc-200 dark:border-zinc-700 bg-slate-50 dark:bg-zinc-800" />
 
-                        {/* Admin mode toggle */}
-                        <AdminToggle />
+                        {/* Raw data view toggle */}
+                        <RawDataViewToggle />
 
                         {/* Logout button */}
                         <Button

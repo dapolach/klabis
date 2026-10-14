@@ -17,6 +17,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -51,6 +52,11 @@ class MemberRepositoryAdapter implements MemberRepository {
     @Override
     public int countByBirthYear(int birthYear) {
         return jdbcRepository.countByBirthYear(birthYear);
+    }
+
+    @Override
+    public Optional<LocalDate> findDateOfBirth(MemberId id) {
+        return jdbcRepository.findDateOfBirthById(id.uuid());
     }
 
     @Override
@@ -91,6 +97,13 @@ class MemberRepositoryAdapter implements MemberRepository {
     }
 
     @Override
+    public List<Member> findAllByEmail(String email) {
+        return jdbcRepository.findAllByEmailEqualsIgnoreCase(email).stream()
+                .map(MemberMemento::toMember)
+                .toList();
+    }
+
+    @Override
     public List<Member> findAll() {
         return StreamSupport.stream(jdbcRepository.findAll().spliterator(), false)
                 .map(MemberMemento::toMember)
@@ -100,7 +113,7 @@ class MemberRepositoryAdapter implements MemberRepository {
     @Override
     public List<Member> findAll(MemberFilter filter) {
         List<UUID> fulltextIds = resolveFulltextIds(filter);
-        if (fulltextIds != null && fulltextIds.isEmpty()) {
+        if (matchesNobody(filter, fulltextIds)) {
             return List.of();
         }
 
@@ -114,7 +127,7 @@ class MemberRepositoryAdapter implements MemberRepository {
     @Override
     public Page<Member> findAll(MemberFilter filter, Pageable pageable) {
         List<UUID> fulltextIds = resolveFulltextIds(filter);
-        if (fulltextIds != null && fulltextIds.isEmpty()) {
+        if (matchesNobody(filter, fulltextIds)) {
             return new PageImpl<>(List.of(), pageable, 0);
         }
 
@@ -129,6 +142,11 @@ class MemberRepositoryAdapter implements MemberRepository {
         long total = pageable.isUnpaged() ? results.size() : jdbcAggregateTemplate.count(criteriaQuery, MemberMemento.class);
 
         return new PageImpl<>(results, pageable, total);
+    }
+
+    private static boolean matchesNobody(MemberFilter filter, List<UUID> fulltextIds) {
+        return (fulltextIds != null && fulltextIds.isEmpty())
+                || (filter.bornOn() != null && filter.bornOn().isEmpty());
     }
 
     /**
@@ -151,6 +169,18 @@ class MemberRepositoryAdapter implements MemberRepository {
             conditions.add(Criteria.where("active").isTrue());
         } else if (filter.status() == MemberFilter.StatusFilter.INACTIVE) {
             conditions.add(Criteria.where("active").isFalse());
+        }
+
+        if (filter.incompleteOnly()) {
+            conditions.add(Criteria.where("dataIncomplete").isTrue());
+        }
+
+        if (filter.bornOn() != null) {
+            conditions.add(Criteria.where("dateOfBirth").in(filter.bornOn()));
+        }
+
+        if (filter.bornOnOrBefore() != null) {
+            conditions.add(Criteria.where("dateOfBirth").lessThanOrEquals(filter.bornOnOrBefore()));
         }
 
         if (conditions.isEmpty()) {

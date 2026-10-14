@@ -1,10 +1,11 @@
 package com.klabis.groups.freegroup.infrastructure.listeners;
 
 import com.klabis.CleanupTestData;
-import com.klabis.groups.freegroup.domain.InvitationStatus;
-import com.klabis.groups.common.domain.FreeGroupFilter;
+import com.klabis.KlabisModuleTest;
 import com.klabis.groups.freegroup.domain.FreeGroup;
+import com.klabis.groups.freegroup.domain.FreeGroupFilter;
 import com.klabis.groups.freegroup.domain.FreeGroupRepository;
+import com.klabis.groups.freegroup.domain.InvitationStatus;
 import com.klabis.members.ActiveMembersByAgeProvider;
 import com.klabis.members.MemberId;
 import com.klabis.members.MemberSuspendedEvent;
@@ -14,18 +15,16 @@ import com.klabis.members.domain.RegistrationNumber;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.modulith.test.ApplicationModuleTest;
 import org.springframework.modulith.test.Scenario;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.time.Instant;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@ApplicationModuleTest(value = ApplicationModuleTest.BootstrapMode.STANDALONE)
-@ActiveProfiles("test")
+@KlabisModuleTest
 @CleanupTestData
 @DisplayName("MemberSuspendedEvent integration — pending free-group invitation cancellation")
 class MemberSuspendedEventIntegrationTest {
@@ -47,7 +46,7 @@ class MemberSuspendedEventIntegrationTest {
     @Test
     @DisplayName("should cancel pending invitation and publish FreeGroupInvitationCancelledEvent when MemberSuspendedEvent is received")
     void shouldCancelPendingInvitationAndPublishCancelledEvent(Scenario scenario) {
-        FreeGroup group = FreeGroup.create(new FreeGroup.CreateFreeGroup("Hiking Club", OWNER));
+        FreeGroup group = FreeGroup.create(new FreeGroup.CreateFreeGroup("Hiking Club", OWNER, Set.of()));
         group.invite(OWNER, INVITEE);
         FreeGroup saved = freeGroupRepository.save(group);
 
@@ -87,7 +86,7 @@ class MemberSuspendedEventIntegrationTest {
     @Test
     @DisplayName("should publish FreeGroupInvitationCancelledEvent with correct invitee and empty actor when MemberSuspendedEvent is received")
     void shouldPublishCancelledEventWithCorrectFields(Scenario scenario) {
-        FreeGroup group = FreeGroup.create(new FreeGroup.CreateFreeGroup("Running Group", OWNER));
+        FreeGroup group = FreeGroup.create(new FreeGroup.CreateFreeGroup("Running Group", OWNER, Set.of()));
         group.invite(OWNER, INVITEE);
         FreeGroup saved = freeGroupRepository.save(group);
 

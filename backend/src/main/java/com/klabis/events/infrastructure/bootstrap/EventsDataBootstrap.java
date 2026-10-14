@@ -21,7 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 
 @Component
-@Profile("example-data")
+@Profile("example-data & !oris")
 @Order(4)
 class EventsDataBootstrap implements BootstrapDataInitializer {
 
@@ -143,7 +143,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.minusDays(50),
                         "Praha – Šárecké údolí",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50001",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50001",
                         asCoordinators(coordinator),
                         raceType,
                         RegistrationDeadlines.single(today.minusDays(55)),
@@ -165,7 +165,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.minusDays(30),
                         "Brno",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50002",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50002",
                         null,
                         raceType,
                         RegistrationDeadlines.single(today.minusDays(37)),
@@ -209,7 +209,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(5),
                         "Žďár nad Sázavou",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50003",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50003",
                         null,
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(2)),
@@ -253,7 +253,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(28),
                         null,
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50004",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50004",
                         null,
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(22)),
@@ -275,7 +275,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(42),
                         "Šárka",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50005",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50005",
                         null,
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(35)),
@@ -297,7 +297,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(55),
                         "Čeřínek",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50006",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50006",
                         null,
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(48)),
@@ -352,7 +352,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(38),
                         "Brno",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50007",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50007",
                         asCoordinators(coordinator),
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(31)),
@@ -374,7 +374,7 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
                         today.plusDays(58),
                         "Žďár nad Sázavou",
                         "OOB",
-                        "https://oris.orientacnisporty.cz/Zavod?id=50008",
+                        "https://oris.ceskyorientak.cz/Zavod?id=50008",
                         asCoordinators(coordinator),
                         raceType,
                         RegistrationDeadlines.single(today.plusDays(50)),
@@ -400,7 +400,10 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
         if (regularMember != null) {
             for (int i = 0; i < Math.min(5, openEvents.size()); i++) {
                 Event event = openEvents.get(i);
-                event.registerMember(regularMember, new SiCardNumber("123456"), resolveFirstCategory(event));
+                event.registerMember(regularMember, EventRegisterCommandBuilder.builder()
+                        .siCardNumber("123456")
+                        .categoryId(resolveFirstCategory(event))
+                        .build());
                 eventRepository.save(event);
             }
         }
@@ -409,7 +412,10 @@ class EventsDataBootstrap implements BootstrapDataInitializer {
             for (int i = 0; i < Math.min(2, openEvents.size()); i++) {
                 Event event = openEvents.get(i);
                 if (event.findRegistration(adminMember).isEmpty()) {
-                    event.registerMember(adminMember, new SiCardNumber("999001"), resolveFirstCategory(event));
+                    event.registerMember(adminMember, EventRegisterCommandBuilder.builder()
+                        .siCardNumber("999001")
+                        .categoryId(resolveFirstCategory(event))
+                        .build());
                     eventRepository.save(event);
                 }
             }

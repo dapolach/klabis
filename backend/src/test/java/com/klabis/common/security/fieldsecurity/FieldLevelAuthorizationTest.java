@@ -2,7 +2,9 @@ package com.klabis.common.security.fieldsecurity;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.klabis.common.WithKlabisMockUser;
-import com.klabis.common.WithPostprocessors;
+import com.klabis.common.authorization.TargetId;
+import com.klabis.common.authorization.TargetType;
+import com.klabis.common.CommonInfrastructureWebMvcSetup;
 import com.klabis.common.mvc.MvcComponent;
 import com.klabis.common.users.Authority;
 import com.klabis.common.users.HasAuthority;
@@ -16,7 +18,6 @@ import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.MediaTypes;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authorization.method.HandleAuthorizationDenied;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.MockMvc;
@@ -39,7 +40,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @WebMvcTest(controllers = FieldLevelAuthorizationTest.TestController.class)
 @DisplayName("Field-level authorization on response DTOs")
-@WithPostprocessors
+@CommonInfrastructureWebMvcSetup
 class FieldLevelAuthorizationTest {
 
     private static final String OWNER_ID_STRING = "aaaaaaaa-0000-0000-0000-000000000001";
@@ -47,7 +48,7 @@ class FieldLevelAuthorizationTest {
     private static final UUID OWNER_ID = UUID.fromString(OWNER_ID_STRING);
     private static final UUID OTHER_ID = UUID.fromString(OTHER_ID_STRING);
 
-    private static final String FIELD_READ_AUTHORITY = "FIELD:READ";
+    private static final String FIELD_READ_AUTHORITY = "MEMBERS:READ";
 
     @Autowired
     MockMvc mockMvc;
@@ -56,9 +57,9 @@ class FieldLevelAuthorizationTest {
     @HandleAuthorizationDenied(handlerClass = NullDeniedHandler.class)
     record SensitiveDataResponse(
             String publicField,
-            @PreAuthorize("hasAuthority('" + FIELD_READ_AUTHORITY + "')")
+            @HasAuthority(Authority.MEMBERS_READ)
             String hiddenField,
-            @PreAuthorize("hasAuthority('" + FIELD_READ_AUTHORITY + "')")
+            @HasAuthority(Authority.MEMBERS_READ)
             @HandleAuthorizationDenied(handlerClass = MaskDeniedHandler.class)
             String maskedField,
             @HasAuthority(Authority.MEMBERS_MANAGE)
@@ -72,10 +73,10 @@ class FieldLevelAuthorizationTest {
     record PatchSensitiveDataRequest(
             JsonNullable<String> publicField,
 
-            @PreAuthorize("hasAuthority('" + FIELD_READ_AUTHORITY + "')")
+            @HasAuthority(Authority.MEMBERS_READ)
             JsonNullable<String> hiddenField,
 
-            @PreAuthorize("hasAuthority('" + FIELD_READ_AUTHORITY + "')")
+            @HasAuthority(Authority.MEMBERS_READ)
             JsonNullable<String> maskedField,
 
             @HasAuthority(Authority.MEMBERS_MANAGE)
@@ -89,7 +90,7 @@ class FieldLevelAuthorizationTest {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @HandleAuthorizationDenied(handlerClass = NullDeniedHandler.class)
     record OwnershipDataResponse(
-            @OwnerId UUID ownerId,
+            @TargetId(TargetType.MEMBER) UUID ownerId,
             String publicField,
             @HasAuthority(Authority.MEMBERS_MANAGE) @OwnerVisible String ownerOrAdminField,
             @OwnerVisible String ownerOnlyField,
@@ -100,6 +101,29 @@ class FieldLevelAuthorizationTest {
             JsonNullable<String> publicField,
             @HasAuthority(Authority.MEMBERS_MANAGE) @OwnerVisible JsonNullable<String> ownerOrAdminField,
             @OwnerVisible JsonNullable<String> ownerOnlyField
+    ) {}
+
+    // JsonNullable<T> response fields go through a second ValueSerializerModifier
+    // (org.openapitools:jackson-databind-nullable's JsonNullableJackson3Module), registered
+    // independently of FieldSecurityJacksonModule with no defined order between the two. This
+    // record exists to prove @HasAuthority still gates a JsonNullable-typed property despite that.
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @HandleAuthorizationDenied(handlerClass = NullDeniedHandler.class)
+    record JsonNullableFieldResponse(
+            String publicField,
+            @HasAuthority(Authority.MEMBERS_MANAGE)
+            JsonNullable<String> hasAuthorityJsonNullableField
+    ) {}
+
+    // No @JsonInclude(NON_NULL) here on purpose: under NON_NULL, JsonNullable.undefined() and
+    // JsonNullable.of(null) can both end up omitted, which would hide the distinction this test
+    // record exists to observe — a defined-but-null value must still serialize as an explicit
+    // `null`, not be silently dropped like the undefined case.
+    @HandleAuthorizationDenied(handlerClass = NullDeniedHandler.class)
+    record JsonNullableDefinedNullFieldResponse(
+            String publicField,
+            @HasAuthority(Authority.MEMBERS_MANAGE)
+            JsonNullable<String> hasAuthorityJsonNullableField
     ) {}
 
     @MvcComponent
@@ -144,26 +168,44 @@ class FieldLevelAuthorizationTest {
         }
 
         @PatchMapping("/api/test/ownership-auth/{id}")
-        ResponseEntity<Void> updateOwnershipData(@PathVariable @OwnerId UUID id, @RequestBody OwnershipPatchRequest body) {
+        ResponseEntity<Void> updateOwnershipData(@PathVariable @TargetId(TargetType.MEMBER) UUID id, @RequestBody OwnershipPatchRequest body) {
             return ResponseEntity.noContent().build();
         }
 
         @GetMapping("/api/test/ownership-method/{id}")
         @com.klabis.common.users.HasAuthority(Authority.MEMBERS_MANAGE)
         @OwnerVisible
-        ResponseEntity<String> getOwnershipProtectedResource(@PathVariable @OwnerId UUID id) {
+        ResponseEntity<String> getOwnershipProtectedResource(@PathVariable @TargetId(TargetType.MEMBER) UUID id) {
             return ResponseEntity.ok("protected-data");
         }
 
         @GetMapping("/api/test/owner-only-method/{id}")
         @OwnerVisible
-        ResponseEntity<String> getOwnerOnlyResource(@PathVariable @OwnerId UUID id) {
+        ResponseEntity<String> getOwnerOnlyResource(@PathVariable @TargetId(TargetType.MEMBER) UUID id) {
             return ResponseEntity.ok("owner-only-data");
+        }
+
+        @GetMapping(value = "/test/json-nullable-field-auth", produces = MediaTypes.HAL_FORMS_JSON_VALUE)
+        EntityModel<JsonNullableFieldResponse> getJsonNullableFieldData() {
+            return EntityModel.of(new JsonNullableFieldResponse(
+                    "public-value", JsonNullable.of("secret-value")));
+        }
+
+        @GetMapping(value = "/test/json-nullable-field-auth-undefined", produces = MediaTypes.HAL_FORMS_JSON_VALUE)
+        EntityModel<JsonNullableFieldResponse> getJsonNullableFieldDataUndefined() {
+            return EntityModel.of(new JsonNullableFieldResponse(
+                    "public-value", JsonNullable.undefined()));
+        }
+
+        @GetMapping(value = "/test/json-nullable-field-auth-defined-null", produces = MediaTypes.HAL_FORMS_JSON_VALUE)
+        EntityModel<JsonNullableDefinedNullFieldResponse> getJsonNullableFieldDataDefinedNull() {
+            return EntityModel.of(new JsonNullableDefinedNullFieldResponse(
+                    "public-value", JsonNullable.of(null)));
         }
     }
 
     @Nested
-    @DisplayName("authorized user with FIELD:READ authority")
+    @DisplayName("authorized user with MEMBERS:READ authority")
     class AuthorizedUser {
 
         @Test
@@ -194,8 +236,8 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser(authorities = {FIELD_READ_AUTHORITY})
-        @DisplayName("PATCH with JsonNullable request should succeed when user has required authority from @PreAuthorize")
-        void patchShouldSucceedWithRequiredAuthorityForPreAuthorize() throws Exception {
+        @DisplayName("PATCH with JsonNullable request should succeed when user has required authority from @HasAuthority")
+        void patchShouldSucceedWithRequiredAuthorityForMembersRead() throws Exception {
             mockMvc.perform(patch("/test/field-auth")
                             .with(csrf())
                             .contentType(MediaType.APPLICATION_JSON)
@@ -235,8 +277,8 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser(authorities = {FIELD_READ_AUTHORITY})
-        @DisplayName("user with FIELD:READ sees hiddenField and maskedField but not hasAuthority* fields")
-        void fieldReadUserSeesPreAuthorizeFieldsOnly() throws Exception {
+        @DisplayName("user with MEMBERS:READ sees hiddenField and maskedField but not hasAuthority* fields")
+        void fieldReadUserSeesMembersReadFieldsOnly() throws Exception {
             mockMvc.perform(get("/test/field-auth").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.publicField").value("public-value"))
@@ -261,7 +303,7 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser(authorities = {FIELD_READ_AUTHORITY})
-        @DisplayName("PATCH with FIELD:READ sending authorized field and unauthorized hasAuthorityHiddenField returns 403")
+        @DisplayName("PATCH with MEMBERS:READ sending authorized field and unauthorized hasAuthorityHiddenField returns 403")
         void patchWithMixedAuthoritiesReturns403() throws Exception {
             mockMvc.perform(patch("/test/field-auth")
                             .with(csrf())
@@ -272,8 +314,8 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser(authorities = {FIELD_READ_AUTHORITY})
-        @DisplayName("HAL+FORMS template with FIELD:READ shows hiddenField and maskedField, hides hasAuthority* fields")
-        void halFormsTemplateWithFieldReadShowsPreAuthorizeProperties() throws Exception {
+        @DisplayName("HAL+FORMS template with MEMBERS:READ shows hiddenField and maskedField, hides hasAuthority* fields")
+        void halFormsTemplateWithFieldReadShowsMembersReadProperties() throws Exception {
             mockMvc.perform(get("/test/field-auth").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$._templates.updateSensitiveData.properties[?(@.name == 'publicField')]").exists())
@@ -298,7 +340,7 @@ class FieldLevelAuthorizationTest {
     }
 
     @Nested
-    @DisplayName("user without FIELD:READ authority")
+    @DisplayName("user without MEMBERS:READ authority")
     class UnauthorizedUser {
 
         @Test
@@ -316,7 +358,7 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser
-        @DisplayName("HAL+FORMS template should only contain publicField when user lacks FIELD:READ and MEMBERS:MANAGE authority")
+        @DisplayName("HAL+FORMS template should only contain publicField when user lacks MEMBERS:READ and MEMBERS:MANAGE authority")
         void shouldFilterTemplatePropertiesBasedOnAuthorization() throws Exception {
             mockMvc.perform(get("/test/field-auth").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
                     .andExpect(status().isOk())
@@ -329,8 +371,8 @@ class FieldLevelAuthorizationTest {
 
         @Test
         @WithMockUser
-        @DisplayName("PATCH with JsonNullable request should return 403 when user attempts to update field where he lacks required authority defined by @PreAuthorize")
-        void patchShouldReturn403WithoutRequiredAuthorityPreAuthorize() throws Exception {
+        @DisplayName("PATCH with JsonNullable request should return 403 when user attempts to update field where he lacks required authority defined by @HasAuthority")
+        void patchShouldReturn403WithoutRequiredAuthority() throws Exception {
             mockMvc.perform(patch("/test/field-auth")
                             .with(csrf())
                             .contentType(MediaType.APPLICATION_JSON)
@@ -565,6 +607,58 @@ class FieldLevelAuthorizationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"publicField\": \"new-value\"}"))
                     .andExpect(status().is2xxSuccessful());
+        }
+    }
+
+    @Nested
+    @DisplayName("@HasAuthority on a JsonNullable<T> response field")
+    class JsonNullableFieldAuthorization {
+
+        @Test
+        @WithKlabisMockUser(authorities = {Authority.MEMBERS_MANAGE})
+        @DisplayName("authorized user sees the JsonNullable field's value")
+        void authorizedUserSeesJsonNullableField() throws Exception {
+            mockMvc.perform(get("/test/json-nullable-field-auth").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.publicField").value("public-value"))
+                    .andExpect(jsonPath("$.hasAuthorityJsonNullableField").value("secret-value"));
+        }
+
+        @Test
+        @WithMockUser
+        @DisplayName("unauthorized user does not see the JsonNullable field, even though it is present")
+        void unauthorizedUserDoesNotSeeJsonNullableField() throws Exception {
+            mockMvc.perform(get("/test/json-nullable-field-auth").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.publicField").value("public-value"))
+                    .andExpect(jsonPath("$.hasAuthorityJsonNullableField").doesNotExist());
+        }
+
+        @Test
+        @WithKlabisMockUser(authorities = {Authority.MEMBERS_MANAGE})
+        @DisplayName("undefined JsonNullable still serializes as absent for an authorized caller")
+        void authorizedUserStillSeesUndefinedAsAbsent() throws Exception {
+            // Guards against a fix that "hides" a field by making SecuredBeanPropertyWriter
+            // always write null instead of delegating to the JsonNullable writer's own
+            // undefined-skip logic — that would satisfy the two tests above while silently
+            // breaking JsonNullable's tri-state contract for authorized callers.
+            mockMvc.perform(get("/test/json-nullable-field-auth-undefined").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.publicField").value("public-value"))
+                    .andExpect(jsonPath("$.hasAuthorityJsonNullableField").doesNotExist());
+        }
+
+        @Test
+        @WithKlabisMockUser(authorities = {Authority.MEMBERS_MANAGE})
+        @DisplayName("a defined-but-null JsonNullable still serializes as explicit null for an authorized caller")
+        void authorizedUserSeesDefinedNullAsExplicitNull() throws Exception {
+            // The third leg of the tri-state: defined-null must be distinguishable from
+            // undefined. If the security wrapper collapsed both to "absent", this would pass
+            // the undefined-case test above for the wrong reason.
+            mockMvc.perform(get("/test/json-nullable-field-auth-defined-null").accept(MediaTypes.HAL_FORMS_JSON_VALUE))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.publicField").value("public-value"))
+                    .andExpect(jsonPath("$.hasAuthorityJsonNullableField").value(org.hamcrest.Matchers.nullValue()));
         }
     }
 }

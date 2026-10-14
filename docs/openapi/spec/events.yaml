@@ -58,8 +58,9 @@ paths:
             createEventType:
               operation: createEventType
               description: |
-                Present only for callers with EVENTS:MANAGE. The orisDisciplineIds property is
-                populated at runtime with the available ORIS discipline options.
+                Present only for callers with EVENTS:MANAGE. The disciplineIds property is
+                populated at runtime with the available options from the local Klabis discipline
+                catalog.
         '400':
           $ref: './_shared/responses.yaml#/components/responses/BadRequest'
         '401':
@@ -140,8 +141,9 @@ paths:
             updateEventType:
               operation: updateEventType
               description: |
-                Present only for callers with EVENTS:MANAGE. The orisDisciplineIds property is
-                populated at runtime with the available ORIS discipline options.
+                Present only for callers with EVENTS:MANAGE. The disciplineIds property is
+                populated at runtime with the available options from the local Klabis discipline
+                catalog.
             deleteEventType:
               operation: deleteEventType
               description: Present only for callers with EVENTS:MANAGE
@@ -221,6 +223,286 @@ paths:
         '422':
           $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
 
+  /api/disciplines/options:
+    get:
+      operationId: listDisciplineOptions
+      tags: [Disciplines]
+      summary: List disciplines as select options
+      description: |
+        Lightweight value/prompt pairs for discipline picker components (design.md D3 of
+        app-review-fixes-2026-09) — the link a HAL-FORMS options.link on EventType's
+        disciplineIds property points at, mirroring listMemberOptions. Archived disciplines
+        are excluded: they are not offered for assignment to new/updated event types.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      responses:
+        '200':
+          description: Discipline options retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DisciplineOptionResponse'
+            application/prs.hal-forms+json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DisciplineOptionResponse'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+
+  /api/disciplines:
+    get:
+      operationId: listDisciplines
+      tags: [Disciplines]
+      summary: List disciplines
+      description: |
+        Returns a paginated list of all disciplines, active and archived, each with its archived
+        flag. Default: page=0, size=10.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      x-spring-paginated: true
+      parameters:
+        - $ref: './_shared/pagination.yaml#/components/parameters/PageParam'
+        - $ref: './_shared/pagination.yaml#/components/parameters/SizeParam'
+      responses:
+        '200':
+          description: Paginated list of disciplines
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DisciplineDto'
+          x-hal-links:
+            self:
+              description: This collection, with the current paging parameters
+            first:
+              description: First page (present when the result is paged)
+            last:
+              description: Last page (present when the result is paged)
+            next:
+              description: Next page (present when one exists)
+            prev:
+              description: Previous page (present when one exists)
+          x-hal-templates:
+            createDiscipline:
+              operation: createDiscipline
+              description: Present only for callers with EVENTS:MANAGE
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+    post:
+      operationId: createDiscipline
+      tags: [Disciplines]
+      summary: Create a discipline
+      description: |
+        Creates a discipline manually. Normally the local catalog is filled automatically by ORIS
+        discovery; this lets a manager add one by hand, e.g. before ORIS has published it.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDisciplineRequest'
+      responses:
+        '201':
+          description: Discipline created
+          headers:
+            Location:
+              description: URI of the created discipline
+              schema:
+                type: string
+                format: uri
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/disciplines/{id}:
+    get:
+      operationId: getDiscipline
+      tags: [Disciplines]
+      summary: Get discipline by ID
+      description: Returns a single discipline.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_READ
+      parameters:
+        - $ref: '#/components/parameters/DisciplineIdParam'
+      responses:
+        '200':
+          description: Discipline found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisciplineDto'
+          x-hal-links:
+            self:
+              description: This discipline
+            collection:
+              operation: listDisciplines
+              description: Back to the discipline list
+            sync:
+              operation: getSyncState
+              description: Present only when the discipline is paired to ORIS
+          x-hal-templates:
+            updateDiscipline:
+              operation: updateDiscipline
+              description: |
+                Present only for callers with EVENTS:MANAGE and only when the discipline is not
+                paired to ORIS — code/name are ORIS-owned once paired.
+            archiveDiscipline:
+              operation: archiveDiscipline
+              description: Present only for callers with EVENTS:MANAGE and only while the discipline is active
+            restoreDiscipline:
+              operation: restoreDiscipline
+              description: Present only for callers with EVENTS:MANAGE and only while the discipline is archived
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+    put:
+      operationId: updateDiscipline
+      tags: [Disciplines]
+      summary: Update a discipline
+      description: |
+        Updates an existing discipline's code/name. Refused with 409 when the discipline is paired
+        to ORIS — ORIS is that discipline's sole source of truth for these fields once paired.
+        Normally unreachable over HTTP since updateDiscipline is not offered in that case.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/DisciplineIdParam'
+      requestBody:
+        required: true
+        x-codegen-request-body-name: request
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDisciplineRequest'
+      responses:
+        '204':
+          description: Discipline updated
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          # DisciplineExceptionHandler maps DisciplineNotEditableException to 409 here.
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+    delete:
+      operationId: archiveDiscipline
+      tags: [Disciplines]
+      summary: Archive a discipline
+      description: |
+        Soft-deletes (archives) the discipline. Always succeeds, regardless of how many event types
+        still reference its id — unlike deleteEventType, archiving never refuses.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      parameters:
+        - $ref: '#/components/parameters/DisciplineIdParam'
+      responses:
+        '204':
+          description: Discipline archived
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
+  /api/disciplines/{id}/restore:
+    post:
+      operationId: restoreDiscipline
+      tags: [Disciplines]
+      summary: Restore an archived discipline
+      description: |
+        Restores an archived discipline and, if it was paired to ORIS, reactivates the sync pairing.
+        Refused with 409 when the discipline is not currently archived.
+      security:
+        - KlabisAuth: [EVENTS]
+      x-klabis-authority: EVENTS_MANAGE
+      x-spring-provide-args:
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
+      parameters:
+        - $ref: '#/components/parameters/DisciplineIdParam'
+      responses:
+        '204':
+          description: Discipline restored
+          content:
+            application/prs.hal-forms+json: {}
+        '400':
+          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './_shared/responses.yaml#/components/responses/NotFound'
+        '409':
+          # DisciplineExceptionHandler maps DisciplineNotArchivedException to 409 here.
+          $ref: './_shared/responses.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
+
   /api/events:
     get:
       operationId: listEvents
@@ -238,7 +520,7 @@ paths:
       x-klabis-authority: EVENTS_READ
       x-spring-paginated: true
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
       parameters:
         - $ref: './_shared/pagination.yaml#/components/parameters/PageParam'
         - $ref: './_shared/pagination.yaml#/components/parameters/SizeParam'
@@ -415,7 +697,7 @@ paths:
         - KlabisAuth: [EVENTS]
       x-klabis-authority: EVENTS_READ
       x-spring-provide-args:
-        - '@com.klabis.members.ActingUser com.klabis.members.CurrentUserData currentUser'
+        - '@com.klabis.common.users.ActingUser com.klabis.members.CurrentUserData currentUser'
       parameters:
         - $ref: '#/components/parameters/EventIdParam'
       responses:
@@ -448,31 +730,46 @@ paths:
               description: Present when the event has an event type assigned
             accommodation-list:
               operation: getAccommodationList
-              description: Present only for the event coordinator or callers with EVENTS:REGISTRATIONS
+              description: |
+                Present only when the event offers shared accommodation and the caller is the
+                event coordinator or has EVENTS:REGISTRATIONS
             newRegistration:
               operation: getRegistration
               description: |
                 Present for the caller's own not-yet-existing registration when registration is
                 being offered
+            sync:
+              operation: getSyncState
+              description: |
+                Present when the event is enrolled in synchronisation. The link
+                itself and the headline state returned by the sync sub-resource are
+                visible to any signed-in user; only the detail fields and action
+                templates (synchronizeNow, acknowledgeSyncConflict, etc.) inside
+                the sync sub-resource are gated on SYNC:MANAGE.
           x-hal-templates:
             updateEvent:
               operation: updateEvent
-              description: Present for the event coordinator or callers with EVENTS:MANAGE
+              description: |
+                Present for the event coordinator or callers with EVENTS:MANAGE. Includes the
+                sharedTransportEnabled / sharedAccommodationEnabled properties.
             publishEvent:
               operation: publishEvent
               description: Present for DRAFT events and callers with EVENTS:MANAGE
             cancelEvent:
               operation: cancelEvent
               description: Present for DRAFT/ACTIVE events and callers with EVENTS:MANAGE
-            syncEventFromOris:
-              operation: syncEventFromOris
-              description: Present when ORIS integration is active and the event has an orisId
             registerForEvent:
               operation: registerForEvent
-              description: Present when registrations are open and the caller is not yet registered
+              description: |
+                Present when registrations are open and the caller is not yet registered. The
+                wantsSharedTransport / wantsSharedAccommodation properties are included only for
+                the offers the event has enabled.
             editRegistration:
               operation: editRegistration
-              description: Present when registrations are open and the caller is registered
+              description: |
+                Present when registrations are open and the caller is registered. The
+                wantsSharedTransport / wantsSharedAccommodation properties are included only for
+                the offers the event has enabled.
             unregisterFromEvent:
               operation: unregisterFromEvent
               description: Present when registrations are open and the caller is registered
@@ -498,12 +795,10 @@ paths:
         may be provided; absent fields are left unchanged.
       security:
         - KlabisAuth: [EVENTS]
-      # No x-klabis-authority / x-klabis-owner-visible: authorization is enforced imperatively in
-      # the controller (EventAffordanceSupport.isCoordinatorOrHasManageAuthority — event coordinator
-      # OR EVENTS:MANAGE), but "coordinator" is a set of member IDs stored on the event itself, not
-      # a single path/query parameter this spec extension can name. Modeling it here would require
-      # inventing a new x-klabis-* extension (see klabis-api-spec skill's anti-patterns), so the
-      # check stays in the controller and is only documented in prose.
+      # EVENTS_EDIT is held over specific events by their coordinators (EventCoordinatorRelationshipSource);
+      # EVENTS_MANAGE over all events. Changing the coordinators themselves is EVENTS_MANAGE only
+      # (see UpdateEventRequest.coordinators).
+      x-klabis-authority: [EVENTS_MANAGE, EVENTS_EDIT]
       parameters:
         - $ref: '#/components/parameters/EventIdParam'
       requestBody:
@@ -610,18 +905,18 @@ paths:
       summary: Get accommodation list for an event
       description: |
         Returns the accommodation list for an event with personal details for each registered
-        member. Accessible only to the event coordinator or users with EVENTS:REGISTRATIONS
-        authority. Fields that are not recorded for a member are returned as null.
+        member. Accessible only to users holding EVENTS:REGISTRATIONS or EVENTS:REGISTRATIONS_READ
+        over the event (the event coordinators). Fields that are not recorded for a member are returned as null.
 
         This operation also supports `Accept: text/csv`, returning a UTF-8 BOM, semicolon-delimited
         CSV file with Czech headers (Content-Disposition: attachment) instead of the JSON
         representation described below.
       security:
         - KlabisAuth: [EVENTS]
-      # No x-klabis-authority / x-klabis-owner-visible: authorization is enforced imperatively
-      # (EventAffordanceSupport.isCoordinatorOrHasRegistrationsAuthority — event coordinator OR
-      # EVENTS:REGISTRATIONS), for the same reason as updateEvent above: "coordinator" cannot be
-      # named as a single owner parameter.
+      # No x-klabis-authority: the caller needs EVENTS_REGISTRATIONS or EVENTS_REGISTRATIONS_READ over
+      # the event (the coordinator grant), and the event must offer shared accommodation. Both are
+      # checked in EventController through AuthorizationEvaluator.isAllowed over TargetRef.event,
+      # because the event offering the service is a domain rule the spec cannot express.
       parameters:
         - $ref: '#/components/parameters/RegEventIdParam'
       responses:
@@ -703,46 +998,19 @@ paths:
         '422':
           $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
 
-  /api/events/{id}/sync-from-oris:
-    post:
-      operationId: syncEventFromOris
-      tags: [OrisEvents]
-      summary: Sync event from ORIS
-      description: |
-        Re-fetches event data from ORIS and overwrites all local fields. Only allowed for DRAFT and
-        ACTIVE events with an orisId.
-      security:
-        - KlabisAuth: [EVENTS]
-      x-klabis-authority: EVENTS_MANAGE
-      parameters:
-        - $ref: '#/components/parameters/EventIdParam'
-      responses:
-        '204':
-          description: Event synced from ORIS successfully
-          content:
-            application/prs.hal-forms+json: {}
-        '400':
-          $ref: './_shared/responses.yaml#/components/responses/BadRequest'
-        '401':
-          $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
-        '403':
-          $ref: './_shared/responses.yaml#/components/responses/Forbidden'
-        '404':
-          $ref: './_shared/responses.yaml#/components/responses/NotFound'
-        '409':
-          $ref: './_shared/responses.yaml#/components/responses/Conflict'
-        '422':
-          $ref: './_shared/responses.yaml#/components/responses/UnprocessableEntity'
-
   /api/events/sync-from-oris/all-upcoming:
     post:
       operationId: syncAllUpcomingFromOris
       tags: [OrisEvents]
       summary: Bulk sync all upcoming ORIS events
       description: |
-        Synchronises all DRAFT/ACTIVE events with eventDate >= today that have an ORIS ID.
-        Processes each event sequentially; partial failures are collected and returned in the
-        summary. Always returns 200 — check failureCount in the response body.
+        Runs a manual synchronisation pass over every active synchronisation record for events
+        (design.md D18) — ignoring next-attempt-due and the dirty flag, since a manager explicitly
+        asking for freshness wants every record attempted now. Records already in CONFLICT or FAILED
+        are not attempted; they are counted and listed separately (awaitingDecisionCount / results, and
+        stoppedByFailureCount / results) rather than lumped into failureCount, since only a decision on
+        the synchronisation resource — not a retry — can move them again. Always returns 200 — inspect
+        the counts in the response body.
       security:
         - KlabisAuth: [EVENTS]
       x-klabis-authority: EVENTS_MANAGE
@@ -903,8 +1171,8 @@ paths:
         List all registrations for an event. SI card numbers are not included for privacy
         protection. Supported sort fields: firstName, lastName, category, registrationTime.
         Default sort: registrationTime ASC. sort=registrationTime is silently ignored for members
-        without EVENTS:REGISTRATIONS authority who are not the event coordinator. Unknown sort
-        fields also fall back to default.
+        without EVENTS:REGISTRATIONS or EVENTS:REGISTRATIONS_READ (the event coordinators) over the
+        event. Unknown sort fields also fall back to default.
       security:
         - KlabisAuth: [EVENTS]
       # No x-klabis-authority / x-klabis-owner-visible: this endpoint acts on the CALLER's own
@@ -997,13 +1265,16 @@ paths:
       summary: Get registration by member ID
       description: |
         Get a member's event registration including SI card number. Accessible by the member
-        themselves or a user with EVENTS:REGISTRATIONS authority. When new=true, returns prefilled
+        themselves, a user with EVENTS:REGISTRATIONS authority, or the event coordinators
+        (EVENTS:REGISTRATIONS_READ over the event). When new=true, returns prefilled
         defaults (siCardNumber from profile) for a not-yet-existing registration — this still
         requires the caller to be the target member themselves regardless of authority.
+      # No x-klabis-authority / x-klabis-owner-visible: the rule is "owner of the member OR a grant
+      # over the event", and one target cannot express both. It is checked imperatively by
+      # RegistrationReadAccess.canRead in EventRegistrationController, and every producer of a link
+      # to this operation checks it too (design.md D3).
       security:
         - KlabisAuth: [EVENTS]
-      x-klabis-authority: EVENTS_REGISTRATIONS
-      x-klabis-owner-visible: true
       parameters:
         - $ref: '#/components/parameters/RegMemberIdParam'
         - $ref: '#/components/parameters/RegEventIdParam'
@@ -1030,20 +1301,32 @@ paths:
               operation: getEvent
               description: The event this registration belongs to
           x-hal-templates:
+            registerForEvent:
+              operation: registerForEvent
+              description: |
+                Present only on the newRegistration=true prefill response, when registrations are
+                open and the member is not blocked from registering. The wantsSharedTransport /
+                wantsSharedAccommodation properties are included only for the offers the event
+                has enabled.
             editRegistration:
               operation: editRegistration
-              description: Present when registrations are open
+              description: |
+                Present only on the existing-registration (newRegistration=false) response, when
+                registrations are open. The wantsSharedTransport / wantsSharedAccommodation
+                properties are included only for the offers the event has enabled.
             unregisterFromEvent:
               operation: unregisterFromEvent
-              description: Present when registrations are open and the caller is the registered member
+              description: |
+                Present only on the existing-registration (newRegistration=false) response, when
+                registrations are open and the caller is the registered member
         '400':
           $ref: './_shared/responses.yaml#/components/responses/BadRequest'
         '401':
           $ref: './_shared/responses.yaml#/components/responses/Unauthorized'
         '403':
           description: |
-            Forbidden - must be the member or have EVENTS:REGISTRATIONS; or new=true with
-            mismatched memberId
+            Forbidden - must be the member, have EVENTS:REGISTRATIONS or be a coordinator of the
+            event; or new=true with mismatched memberId
           content:
             application/problem+json:
               schema:
@@ -1257,6 +1540,7 @@ components:
             profile: display user profile information
             MEMBERS: Members
             EVENTS: Events
+            SYNC: Synchronisation
 
   parameters:
     EventIdParam:
@@ -1264,6 +1548,7 @@ components:
       in: path
       description: Event UUID
       required: true
+      x-klabis-target-id: EVENT
       schema:
         type: string
         format: uuid
@@ -1272,6 +1557,15 @@ components:
       name: id
       in: path
       description: Event type UUID
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    DisciplineIdParam:
+      name: id
+      in: path
+      description: Discipline UUID
       required: true
       schema:
         type: string
@@ -1291,10 +1585,10 @@ components:
       in: path
       description: Member UUID
       required: true
-      # Marks the owner for operations that declare x-klabis-owner-visible. Inert on its own:
-      # @OwnerId is only consulted for a method or field already marked @OwnerVisible, so the
-      # operations here that do not opt into ownership are unaffected.
-      x-klabis-owner-id: true
+      # Identifies the target member. Inert on its own: @TargetId is only consulted for a method
+      # marked @OwnerVisible or guarded by an authority held over specific targets, so the
+      # operations here that do neither are unaffected.
+      x-klabis-target-id: MEMBER
       schema:
         type: string
         format: uuid
@@ -1330,8 +1624,10 @@ components:
     EventSummaryDto:
       type: object
       description: |
-        Event summary for list views. The status field is only visible to callers with
-        EVENTS:MANAGE authority.
+        Event summary for list views. The status field is returned to every authenticated
+        caller; the events list renders it in a column only for callers with EVENTS:MANAGE
+        authority. The cancellation reason is not part of the summary — it is shown on the
+        event detail instead.
       properties:
         id:
           type: string
@@ -1359,21 +1655,23 @@ components:
         status:
           allOf:
             - $ref: '#/components/schemas/EventStatus'
-          x-klabis-authority: EVENTS_MANAGE
           x-klabis-halforms-access: READ_ONLY
         categories:
           type: array
           items:
             $ref: '#/components/schemas/EventCategoryDto'
-        cancellationReason:
-          type: string
-          x-klabis-halforms-access: READ_ONLY
         deadlines:
           type: array
           items:
             type: string
             format: date
           x-klabis-halforms-access: READ_ONLY
+        sharedTransportEnabled:
+          type: boolean
+          description: Whether the event offers shared transport members can opt into at registration.
+        sharedAccommodationEnabled:
+          type: boolean
+          description: Whether the event offers shared accommodation members can opt into at registration.
 
     EventCategoryDto:
       type: object
@@ -1442,6 +1740,44 @@ components:
           $ref: '#/components/schemas/RankingDto'
         baseEntryFee:
           $ref: '#/components/schemas/EntryFeeDto'
+        sharedTransportEnabled:
+          type: boolean
+          description: Whether the event offers shared transport members can opt into at registration.
+        sharedAccommodationEnabled:
+          type: boolean
+          description: Whether the event offers shared accommodation members can opt into at registration.
+        siUsage:
+          type: string
+          enum: [NOT_USED, OPTIONAL, REQUIRED]
+          description: How the event uses SI cards - not at all, optionally or as a requirement for registration.
+        siRentalAllowed:
+          type: boolean
+          description: Whether participants may rent an SI card from the organiser. Always false when SI is not used.
+        sharedServicesSummary:
+          allOf:
+            - $ref: '#/components/schemas/SharedServicesSummaryDto'
+          x-klabis-halforms-access: READ_ONLY
+
+    SharedServicesSummaryDto:
+      type: object
+      description: |
+        Per-offer counts of registered members who opted into a shared service. Populated by the
+        server only for the event coordinator or callers with EVENTS:REGISTRATIONS, only for ACTIVE
+        events, and only while at least one offer is enabled; omitted entirely otherwise. Each
+        sub-object is present only when the corresponding offer is enabled.
+      properties:
+        sharedTransport:
+          $ref: '#/components/schemas/SharedServiceCountDto'
+        sharedAccommodation:
+          $ref: '#/components/schemas/SharedServiceCountDto'
+
+    SharedServiceCountDto:
+      type: object
+      properties:
+        count:
+          type: integer
+          format: int32
+          description: Number of registered members who opted into this shared service.
 
     RankingDto:
       type: object
@@ -1463,7 +1799,7 @@ components:
         `categories`, which the hand-written predecessor lacked. A blank category name used to reach
         the domain and fail its `Assert.hasText` as a 500; a negative fee amount was not checked
         anywhere at all. Both are now a 400 with field errors.
-      required: [name, eventDate, organizer]
+      required: [name, eventDate, organizer, siUsage]
       properties:
         name:
           type: string
@@ -1489,6 +1825,7 @@ components:
           items:
             type: string
             format: uuid
+          x-hal-input-type: MemberId
         eventTypeId:
           type: string
           format: uuid
@@ -1502,6 +1839,26 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CreateEventCategoryRequest'
+          # The generated element type (CreateEventCategoryRequest) has no frontend factory
+          # record; "CategoryRequest" is the key the event form's category-row renderer switches on.
+          x-hal-input-type: CategoryRequest
+        sharedTransportEnabled:
+          type: boolean
+          default: false
+          description: Offer shared transport for this event. Defaults to false when omitted.
+        sharedAccommodationEnabled:
+          type: boolean
+          default: false
+          description: Offer shared accommodation for this event. Defaults to false when omitted.
+        siUsage:
+          type: string
+          enum: [NOT_USED, OPTIONAL, REQUIRED]
+          description: How the event uses SI cards. Required; no default, the manager must choose.
+          x-hal-input-type: SiUsage
+        siRentalAllowed:
+          type: boolean
+          default: false
+          description: Whether participants may rent an SI card from the organiser. Defaults to false when omitted; ignored when SI is not used.
 
     CreateEventCategoryRequest:
       type: object
@@ -1560,12 +1917,18 @@ components:
         websiteUrl:
           type: [string, 'null']
           x-klabis-url: true
+        # Only EVENTS_MANAGE changes coordinators: the coordinator role unlocks registrants' SI card
+        # numbers and notes, so it must not propagate itself. EVENTS_READ is held by every user, so the
+        # coordinator sees the field read-only.
         coordinators:
           type: [array, 'null']
           uniqueItems: true
           items:
             type: string
             format: uuid
+          x-hal-input-type: MemberId
+          x-klabis-authority: EVENTS_MANAGE
+          x-klabis-read-authority: [EVENTS_READ]
         eventTypeId:
           type: [string, 'null']
           format: uuid
@@ -1579,14 +1942,36 @@ components:
           type: [array, 'null']
           items:
             $ref: '#/components/schemas/UpdateEventCategoryRequest'
+          # See CreateEventRequest.categories — same frontend factory key for the per-row renderer.
+          x-hal-input-type: CategoryRequest
         ranking:
-          oneOf:
-            - $ref: '#/components/schemas/UpdateEventRankingRequest'
-            - type: 'null'
+          $ref: '#/components/schemas/UpdateEventRankingRequest'
+          x-klabis-nullable: true
+          x-hal-input-type: RankingRequest
         baseEntryFee:
-          oneOf:
-            - $ref: '#/components/schemas/EntryFeeRequest'
-            - type: 'null'
+          $ref: '#/components/schemas/EntryFeeRequest'
+          x-klabis-nullable: true
+        sharedTransportEnabled:
+          type: [boolean, 'null']
+          description: |
+            Offer shared transport. Absent leaves the current setting; a value replaces it.
+            Turning it off is always allowed and retains any member choices already made.
+        sharedAccommodationEnabled:
+          type: [boolean, 'null']
+          description: |
+            Offer shared accommodation. Absent leaves the current setting; a value replaces it.
+            Turning it off is always allowed and retains any member choices already made.
+        siUsage:
+          type: [string, 'null']
+          enum: [NOT_USED, OPTIONAL, REQUIRED, null]
+          description: |
+            How the event uses SI cards. Absent or null leaves the current setting; a value replaces it.
+          x-hal-input-type: SiUsage
+        siRentalAllowed:
+          type: [boolean, 'null']
+          description: |
+            Whether participants may rent an SI card. Absent leaves the current setting; a value replaces it.
+            Ignored (stored as false) when SI is not used.
 
     UpdateEventCategoryRequest:
       type: object
@@ -1623,7 +2008,7 @@ components:
         cancellationReason:
           type: string
           maxLength: 500
-          x-field-extra-annotation: com.klabis.common.ui.HalForms(formInputType = "textarea")
+          x-hal-input-type: textarea
 
     ImportCommand:
       type: object
@@ -1649,6 +2034,12 @@ components:
 
     BulkSyncResult:
       type: object
+      description: |
+        Summary of a manual pass over every active event synchronisation record (task 8.4, 8.5).
+        totalProcessed counts every active record considered, including the ones awaiting a decision
+        or stopped by failure — successCount and failureCount cover only records that were actually
+        attempted this pass (design.md D18: the two new categories are reported separately, not lumped
+        into failureCount).
       properties:
         totalProcessed:
           type: integer
@@ -1659,7 +2050,23 @@ components:
         failureCount:
           type: integer
           format: int32
+        awaitingDecisionCount:
+          type: integer
+          format: int32
+          description: Records already in CONFLICT — not attempted this pass; see awaitingDecision for the per-event list.
+        stoppedByFailureCount:
+          type: integer
+          format: int32
+          description: Records already terminally FAILED — not attempted this pass; see stoppedByFailure for the per-event list.
         results:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventSyncEntry'
+        awaitingDecision:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventSyncEntry'
+        stoppedByFailure:
           type: array
           items:
             $ref: '#/components/schemas/EventSyncEntry'
@@ -1715,25 +2122,86 @@ components:
     RegisterEventRequest:
       type: object
       description: Registration data submitted by the acting member.
-      required: [siCardNumber]
       properties:
         siCardNumber:
           type: string
-          pattern: '\d{6,7}'
+          pattern: '^\d{4,8}$'
+          description: |
+            SI card number. Whether it is needed follows the event's SI policy; leave empty to rent a
+            card where the event allows it. Ignored when the event does not use SI cards.
+        wantsToRentSi:
+          type: boolean
+          default: false
+          description: |
+            Member asks the organiser to rent them an SI card. Meaningful only when the event allows
+            rental. Defaults to false.
         categoryId:
           type: string
           format: uuid
+        wantsSharedTransport:
+          type: boolean
+          default: false
+          description: |
+            Member opts into the event's shared transport. Always part of the template; the
+            registration dialog hides it when the event does not offer it. Defaults to false.
+        wantsSharedAccommodation:
+          type: boolean
+          default: false
+          description: |
+            Member opts into the event's shared accommodation. Always part of the template; the
+            registration dialog hides it when the event does not offer it. Defaults to false.
+        internalNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
+          description: Free-text remark for the club only. Blank means no note.
+        orisNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
+          description: Free-text remark for the organiser's ORIS entry. Blank means no note.
 
     EditRegistrationRequest:
       type: object
-      required: [siCardNumber]
       properties:
         siCardNumber:
           type: string
-          pattern: '\d{6,7}'
+          pattern: '^\d{4,8}$'
+          description: |
+            SI card number. Whether it is needed follows the event's SI policy; a registration that
+            already does not fit the policy keeps its SI values unless these are changed. Ignored
+            when the event does not use SI cards.
+        wantsToRentSi:
+          type: boolean
+          default: false
+          description: |
+            Member asks the organiser to rent them an SI card. Meaningful only when the event allows
+            rental; otherwise the recorded value is kept. Defaults to false.
         categoryId:
           type: string
           format: uuid
+        wantsSharedTransport:
+          type: boolean
+          default: false
+          description: |
+            Member's shared-transport choice. Always part of the template; the edit dialog hides it
+            when the event does not offer it, and the recorded choice is then kept. Defaults to false.
+        wantsSharedAccommodation:
+          type: boolean
+          default: false
+          description: |
+            Member's shared-accommodation choice. Always part of the template; the edit dialog hides
+            it when the event does not offer it, and the recorded choice is then kept. Defaults to false.
+        internalNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
+          description: Free-text remark for the club only. Blank or absent means no note.
+        orisNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
+          description: Free-text remark for the organiser's ORIS entry. Blank or absent means no note.
 
     # A named schema, not an inline array: the item payload needs a stable wire-contract name. Two
     # operations derive from it — getEvent's x-hal-embedded builds the
@@ -1742,7 +2210,8 @@ components:
       type: object
       description: |
         Registration summary for list views. SI card numbers are not included. registrationTime is
-        visible to the registered member OR callers with EVENTS:REGISTRATIONS.
+        visible to callers with EVENTS:REGISTRATIONS or EVENTS:REGISTRATIONS_READ over the event
+        (the event coordinators).
       x-klabis-relation:
         collectionRelation: registrationDtoList
       properties:
@@ -1756,21 +2225,24 @@ components:
         registrationTime:
           type: string
           format: date-time
-          x-klabis-authority: EVENTS_REGISTRATIONS
-          x-klabis-owner-visible: true
-        # Kept off the wire (@JsonIgnore) but present in the generated Java: coordinators doubles
-        # as the @OwnerId source OwnershipResolver needs to evaluate registrationTime's
-        # @OwnerVisible. See design.md Decision 0 / x-field-extra-annotation for why plain omission
-        # from this schema (the approach used elsewhere for @JsonIgnore) does not work here.
-        coordinators:
-          type: array
-          items:
-            type: string
-            format: uuid
-          x-klabis-owner-id: true
+          x-klabis-authority: [EVENTS_REGISTRATIONS, EVENTS_REGISTRATIONS_READ]
+        wantsSharedTransport:
+          type: boolean
+          description: |
+            Member's shared-transport choice. Present only when the event offers shared transport.
+        wantsSharedAccommodation:
+          type: boolean
+          description: |
+            Member's shared-accommodation choice. Present only when the event offers shared
+            accommodation.
+        # Kept off the wire (@JsonIgnore) but present in the generated Java: the @TargetId source the
+        # authorization evaluator needs to evaluate registrationTime over the event.
+        eventId:
+          type: string
+          format: uuid
+          x-klabis-target-id: EVENT
           x-field-extra-annotation: com.fasterxml.jackson.annotation.JsonIgnore
-        # Needed only by RegistrationRecordTransactionLinkProcessor at runtime (never on the wire);
-        # no ownership role, unlike coordinators above.
+        # Needed only by RegistrationRecordTransactionLinkProcessor at runtime (never on the wire).
         registeredMemberId:
           type: string
           format: uuid
@@ -1779,6 +2251,14 @@ components:
     RegistrationDto:
       type: object
       properties:
+        internalNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
+        orisNote:
+          type: string
+          maxLength: 255
+          x-hal-input-type: textarea
         firstName:
           type: string
           x-klabis-halforms-access: READ_ONLY
@@ -1787,6 +2267,10 @@ components:
           x-klabis-halforms-access: READ_ONLY
         siCardNumber:
           type: string
+          description: Absent when the member gave no SI card number.
+        wantsToRentSi:
+          type: boolean
+          description: Member asked to rent an SI card.
         category:
           allOf:
             - $ref: '#/components/schemas/EventCategoryDto'
@@ -1795,6 +2279,15 @@ components:
           type: string
           format: date-time
           x-klabis-halforms-access: READ_ONLY
+        wantsSharedTransport:
+          type: boolean
+          description: |
+            Member's shared-transport choice. Present only when the event offers shared transport.
+        wantsSharedAccommodation:
+          type: boolean
+          description: |
+            Member's shared-accommodation choice. Present only when the event offers shared
+            accommodation.
 
     # The _embedded key comes from @Relation(collectionRelation = "accommodationList") on the payload
     # record, not from the schema name — see "A payload schema's name is wire contract" in the
@@ -1886,13 +2379,13 @@ components:
         sortOrder:
           type: integer
           format: int32
-        orisDisciplineIds:
+        disciplineIds:
           type: array
-          description: ORIS discipline identifiers mapped onto this event type.
+          description: Local discipline identifiers mapped onto this event type.
           uniqueItems: true
           items:
-            type: integer
-            format: int32
+            type: string
+            format: uuid
 
     CreateEventTypeRequest:
       type: object
@@ -1911,12 +2404,12 @@ components:
           format: int32
           description: Assigned automatically when omitted.
           minimum: 0
-        orisDisciplineIds:
+        disciplineIds:
           type: array
           uniqueItems: true
           items:
-            type: integer
-            format: int32
+            type: string
+            format: uuid
 
     UpdateEventTypeRequest:
       type: object
@@ -1935,9 +2428,64 @@ components:
           format: int32
           description: Left unchanged when omitted.
           minimum: 0
-        orisDisciplineIds:
+        disciplineIds:
           type: array
           uniqueItems: true
           items:
-            type: integer
-            format: int32
+            type: string
+            format: uuid
+
+    # A named schema, not an inline array: the item payload needs a stable wire-contract name for
+    # the bundler to reconstruct the collection envelope in klabis-full.json from.
+    DisciplineDto:
+      type: object
+      description: Discipline catalog entry.
+      properties:
+        id:
+          type: string
+          format: uuid
+          x-klabis-halforms-access: READ_ONLY
+        code:
+          type: string
+        name:
+          type: string
+        archived:
+          type: boolean
+          x-klabis-halforms-access: READ_ONLY
+
+    DisciplineOptionResponse:
+      type: object
+      description: Discipline option for select components
+      properties:
+        value:
+          type: string
+          description: Discipline UUID
+          example: 123e4567-e89b-12d3-a456-426614174000
+        prompt:
+          type: string
+          description: Discipline name
+          example: Orientační běh
+
+    CreateDisciplineRequest:
+      type: object
+      description: Discipline creation data
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          x-klabis-not-blank: true
+        name:
+          type: string
+          x-klabis-not-blank: true
+
+    UpdateDisciplineRequest:
+      type: object
+      description: Discipline update data
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          x-klabis-not-blank: true
+        name:
+          type: string
+          x-klabis-not-blank: true

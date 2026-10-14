@@ -4,7 +4,6 @@ import {enrichTemplateWithReadOnlyFields} from '../utils/halFormsUtils.ts';
 
 interface UseInlineEditingOptions {
     initialEditing?: boolean;
-    fieldTypeOverrides?: Record<string, string>;
     onCancel?: () => void;
 }
 
@@ -12,6 +11,7 @@ interface UseInlineEditingResult {
     isEditing: boolean;
     enrichedTemplate: HalFormsTemplate | null;
     enrichedFieldNames: Set<string>;
+    editableFieldNames: Set<string>;
     startEditing: () => void;
     cancelEditing: () => void;
     postprocessPayload: (payload: Record<string, unknown>) => Record<string, unknown>;
@@ -22,13 +22,13 @@ export function useInlineEditing(
     resourceData: Record<string, unknown>,
     options: UseInlineEditingOptions = {}
 ): UseInlineEditingResult {
-    const {initialEditing = false, fieldTypeOverrides, onCancel} = options;
+    const {initialEditing = false, onCancel} = options;
     const [isEditing, setIsEditing] = useState(initialEditing);
 
     const enrichedTemplate = useMemo(() => {
         if (!isEditing || !template) return null;
-        return enrichTemplateWithReadOnlyFields(template, resourceData, fieldTypeOverrides);
-    }, [isEditing, template, resourceData, fieldTypeOverrides]);
+        return enrichTemplateWithReadOnlyFields(template, resourceData);
+    }, [isEditing, template, resourceData]);
 
     const enrichedFieldNames = useMemo(() =>
         enrichedTemplate
@@ -37,7 +37,9 @@ export function useInlineEditing(
         [enrichedTemplate]);
 
     const originalEditableFieldNames = useMemo(() =>
-        template ? new Set(template.properties.map(p => p.name)) : new Set<string>(),
+        template
+            ? new Set(template.properties.filter(p => p.readOnly !== true).map(p => p.name))
+            : new Set<string>(),
         [template]);
 
     const startEditing = () => setIsEditing(true);
@@ -55,5 +57,13 @@ export function useInlineEditing(
             Object.entries(payload).filter(([key]) => originalEditableFieldNames.has(key))
         );
 
-    return {isEditing, enrichedTemplate, enrichedFieldNames, startEditing, cancelEditing, postprocessPayload};
+    return {
+        isEditing,
+        enrichedTemplate,
+        enrichedFieldNames,
+        editableFieldNames: originalEditableFieldNames,
+        startEditing,
+        cancelEditing,
+        postprocessPayload,
+    };
 }

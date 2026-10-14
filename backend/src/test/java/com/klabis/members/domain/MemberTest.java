@@ -4,6 +4,7 @@ import com.klabis.common.exceptions.BusinessRuleViolationException;
 import com.klabis.common.users.UserId;
 import com.klabis.members.MemberId;
 import com.klabis.members.MemberAssert;
+import com.klabis.members.BirthNumberAccessedEvent;
 import com.klabis.members.MemberCreatedEvent;
 import com.klabis.members.MemberResumedEvent;
 import com.klabis.members.MemberSuspendedEvent;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
+import java.util.Set;
 import java.util.UUID;
 
 import static com.klabis.members.MemberTestDataBuilder.aMember;
@@ -28,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * - Registration number uniqueness
  * - Rodne cislo only for Czech nationality
  * - At least one contact (email + phone) required
- * - Guardian required for minors (<18 years)
+ * - Minor contacts are covered by legal guardians (see MemberCompletenessTest)
  * - Member update methods (contact information, documents, personal details)
  * - Member termination
  */
@@ -99,7 +101,6 @@ class MemberTest {
             assertThat(event.address()).isEqualTo(address);
             assertThat(event.emailAsOptional()).isPresent().contains(email);
             assertThat(event.phoneAsOptional()).isPresent().contains(phone);
-            assertThat(event.guardian()).isNull();
             assertThat(event.isMinor()).isFalse();
             assertThat(event.getPrimaryEmail()).isEqualTo("jan.novak@example.com");
             assertThat(event.occurredAt()).isNotNull();
@@ -107,146 +108,29 @@ class MemberTest {
         }
 
         @Test
-        @DisplayName("should create minor with guardian")
-        void shouldCreateMinorWithGuardian() {
-            // Arrange
-            LocalDate dateOfBirth = LocalDate.now().minusYears(10); // 10 years old
+        @DisplayName("should create minor without own contacts, which are set on the legal guardian group")
+        void shouldCreateMinorWithoutContacts() {
+            LocalDate dateOfBirth = LocalDate.now().minusYears(10);
             int birthYear = dateOfBirth.getYear() % 100;
-            RegistrationNumber registrationNumber = new RegistrationNumber(
-                    "ZBM%02d01".formatted(birthYear)
-            );
+            RegistrationNumber registrationNumber = new RegistrationNumber("ZBM%02d01".formatted(birthYear));
             Address address = new Address("Školská 456", "Brno", "60200", "CZ");
-            GuardianInformation guardian = new GuardianInformation(
-                    "Petr",
-                    "Novák",
-                    "PARENT",
-                    EmailAddress.of("petr.novak@example.com"),
-                    PhoneNumber.of("+420987654321")
-            );
             PersonalInformation personalInformation = PersonalInformation.of(
-                    "Anna",
-                    "Nováková",
-                    dateOfBirth,
-                    "CZ",
-                    Gender.FEMALE
-            );
-            MemberId memberId = new MemberId(UUID.randomUUID());
+                    "Anna", "Nováková", dateOfBirth, "CZ", Gender.FEMALE);
 
-            // Act
-            Member.RegisterMember command = MemberRegisterMemberBuilder.builder()
-                    .id(memberId)
+            Member member = Member.register(MemberRegisterMemberBuilder.builder()
+                    .id(new MemberId(UUID.randomUUID()))
                     .registrationNumber(registrationNumber)
                     .personalInformation(personalInformation)
                     .address(address)
-                    .guardian(guardian)
                     .birthNumber(BirthNumber.of("015315/1234"))
-                    .build();
-            Member member = Member.register(command);
+                    .build());
 
-            // Assert
-            MemberAssert.assertThat(member)
-                    .hasRegistrationNumber(registrationNumber)
-                    .hasGuardianNotNull();
-            assertThat(member.getGuardian().getFirstName()).isEqualTo("Petr");
-
-            assertThat(member.getDomainEvents())
-                    .hasSize(1)
-                    .first()
-                    .isInstanceOf(MemberCreatedEvent.class);
-
+            MemberAssert.assertThat(member).hasRegistrationNumber(registrationNumber);
             MemberCreatedEvent event = (MemberCreatedEvent) member.getDomainEvents().get(0);
-            assertThat(event.eventId()).isNotNull();
-            assertThat(event.memberId()).isEqualTo(member.getId());
-            assertThat(event.registrationNumber()).isEqualTo(registrationNumber);
-            assertThat(event.firstName()).isEqualTo("Anna");
-            assertThat(event.lastName()).isEqualTo("Nováková");
-            assertThat(event.dateOfBirth()).isEqualTo(dateOfBirth);
-            assertThat(event.nationality()).isEqualTo("CZ");
-            assertThat(event.gender()).isEqualTo(Gender.FEMALE);
-            assertThat(event.address()).isEqualTo(address);
+            assertThat(event.isMinor()).isTrue();
             assertThat(event.emailAsOptional()).isEmpty();
             assertThat(event.phoneAsOptional()).isEmpty();
-            assertThat(event.guardian()).isNotNull();
-            assertThat(event.guardian().getFirstName()).isEqualTo("Petr");
-            assertThat(event.guardian().getLastName()).isEqualTo("Novák");
-            assertThat(event.guardian().getRelationship()).isEqualTo("PARENT");
-            assertThat(event.guardian().getEmail()).isEqualTo(EmailAddress.of("petr.novak@example.com"));
-            assertThat(event.guardian().getPhone()).isEqualTo(PhoneNumber.of("+420987654321"));
-            assertThat(event.isMinor()).isTrue();
-            assertThat(event.getPrimaryEmail()).isEqualTo("petr.novak@example.com");
-            assertThat(event.occurredAt()).isNotNull();
-
-        }
-
-        @Test
-        @DisplayName("should use guardian email as primary when member has no email in MemberCreatedEvent")
-        void shouldUseGuardianEmailWhenMemberHasNoneInEvent() {
-            // Arrange - minor with only guardian email
-            LocalDate dateOfBirth = LocalDate.of(2010, 1, 15);
-            RegistrationNumber registrationNumber = new RegistrationNumber("ZBM1003");
-            Address address = new Address("Ulice 1", "Město", "11000", "CZ");
-            GuardianInformation guardian = new GuardianInformation(
-                    "Parent",
-                    "Name",
-                    "PARENT",
-                    EmailAddress.of("parent@example.com"),
-                    PhoneNumber.of("+420777111222")
-            );
-
-            Member.RegisterMember command = MemberRegisterMemberBuilder.builder()
-                    .id(new MemberId(UUID.randomUUID()))
-                    .registrationNumber(registrationNumber)
-                    .personalInformation(PersonalInformation.of("Anna", "Novakova", dateOfBirth, "CZ", Gender.FEMALE))
-                    .address(address)
-                    .guardian(guardian)
-                    .birthNumber(BirthNumber.of("150102/1234"))
-                    .build();
-
-            // Act
-            Member member = Member.register(command);
-
-            // Assert
-            MemberCreatedEvent event = (MemberCreatedEvent) member.getDomainEvents().get(0);
-            assertThat(event.getPrimaryEmail()).isEqualTo("parent@example.com");
-        }
-
-
-        @Test
-        @DisplayName("should fail when minor has no guardian")
-        void shouldFailWhenMinorHasNoGuardian() {
-            // Arrange
-            LocalDate dateOfBirth = LocalDate.now().minusYears(15); // 15 years old
-            int birthYear = dateOfBirth.getYear() % 100;
-            RegistrationNumber registrationNumber = new RegistrationNumber(
-                    "ZBM%02d01".formatted(birthYear)
-            );
-            Address address = new Address("Ulice 1", "Město", "11000", "CZ");
-            EmailAddress email = new EmailAddress("anna@example.com");
-            PhoneNumber phone = new PhoneNumber("+420111222333");
-            PersonalInformation personalInformation = PersonalInformation.of(
-                    "Anna",
-                    "Nováková",
-                    dateOfBirth,
-                    "CZ",
-                    Gender.FEMALE
-            );
-
-            MemberId memberId = new MemberId(UUID.randomUUID());
-
-            // Act & Assert - register() validates business rules
-            assertThatThrownBy(() -> {
-                Member.RegisterMember command = MemberRegisterMemberBuilder.builder()
-                        .id(memberId)
-                        .registrationNumber(registrationNumber)
-                        .personalInformation(personalInformation)
-                        .address(address)
-                        .email(email)
-                        .phone(phone)
-                        .build();
-                Member.register(command);
-            })
-                    .isInstanceOf(BusinessRuleViolationException.class)
-                    .hasMessageContaining("Guardian is required for minors");
+            assertThat(event.getPrimaryEmail()).isNull();
         }
 
         @Test
@@ -341,47 +225,6 @@ class MemberTest {
             })
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("At least one phone number is required (member or guardian)");
-        }
-
-        @Test
-        @DisplayName("should accept guardian contact for minor instead of member contact")
-        void shouldAcceptGuardianContactForMinor() {
-            // Arrange
-            LocalDate dateOfBirth = LocalDate.now().minusYears(12);
-            int birthYear = dateOfBirth.getYear() % 100;
-            RegistrationNumber registrationNumber = new RegistrationNumber(
-                    "ZBM%02d01".formatted(birthYear)
-            );
-            Address address = new Address("Ulice 1", "Město", "11000", "CZ");
-            GuardianInformation guardian = new GuardianInformation(
-                    "Petr",
-                    "Novák",
-                    "PARENT",
-                    EmailAddress.of("petr@example.com"),
-                    PhoneNumber.of("+420999888777")
-            );
-            PersonalInformation personalInformation = PersonalInformation.of(
-                    "Anna",
-                    "Nováková",
-                    dateOfBirth,
-                    "CZ",
-                    Gender.FEMALE
-            );
-            MemberId memberId = new MemberId(UUID.randomUUID());
-
-            // Act
-            Member.RegisterMember command = MemberRegisterMemberBuilder.builder()
-                    .id(memberId)
-                    .registrationNumber(registrationNumber)
-                    .personalInformation(personalInformation)
-                    .address(address)
-                    .guardian(guardian)
-                    .birthNumber(BirthNumber.of("015315/1234"))
-                    .build();
-            Member member = Member.register(command);
-
-            // Assert - should not throw
-            MemberAssert.assertThat(member).hasGuardianNotNull();
         }
 
         @Test
@@ -511,7 +354,6 @@ class MemberTest {
                     .withAddress(Address.of("Hlavní 123", "Praha", "11000", "CZ"))
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
-                    .withNoGuardian()
                     .build();
         }
 
@@ -661,7 +503,6 @@ class MemberTest {
                     .withAddress(Address.of("Hlavní 123", "Praha", "11000", "CZ"))
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
-                    .withNoGuardian()
                     .build();
         }
 
@@ -776,7 +617,6 @@ class MemberTest {
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
                     .withBirthNumber("900515/1234")
-                    .withNoGuardian()
                     .build();
         }
 
@@ -786,7 +626,7 @@ class MemberTest {
             Member member = createAdultMember();
             EmailAddress newEmail = EmailAddress.of("new@example.com");
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).email(newEmail).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).email(newEmail).build());
 
             assertThat(member.getEmail()).isEqualTo(newEmail);
             assertThat(member.getPhone().value()).isEqualTo("+420123456789");
@@ -798,7 +638,7 @@ class MemberTest {
             Member member = createAdultMember();
             PhoneNumber newPhone = PhoneNumber.of("+420999888777");
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).phone(newPhone).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).phone(newPhone).build());
 
             assertThat(member.getPhone()).isEqualTo(newPhone);
             assertThat(member.getEmail().value()).isEqualTo("jan.novak@example.com");
@@ -810,7 +650,7 @@ class MemberTest {
             Member member = createAdultMember();
             Address newAddress = Address.of("Nová 1", "Brno", "60200", "CZ");
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).address(newAddress).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).address(newAddress).build());
 
             assertThat(member.getAddress().street()).isEqualTo("Nová 1");
         }
@@ -820,7 +660,7 @@ class MemberTest {
         void shouldUpdateDietaryRestrictionsWhenProvided() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
 
             assertThat(member.getDietaryRestrictions()).isEqualTo("Vegan");
         }
@@ -829,9 +669,9 @@ class MemberTest {
         @DisplayName("should clear dietary restrictions when explicitly set to null")
         void shouldClearDietaryRestrictionsWhenExplicitlyNull() {
             Member member = createAdultMember();
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions(null).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions(null).build());
 
             assertThat(member.getDietaryRestrictions()).isNull();
         }
@@ -840,9 +680,9 @@ class MemberTest {
         @DisplayName("should leave dietary restrictions untouched when field is absent")
         void shouldLeaveDietaryRestrictionsUntouchedWhenAbsent() {
             Member member = createAdultMember();
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dietaryRestrictions("Vegan").build());
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).chipNumber("999").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).chipNumber("999").build());
 
             assertThat(member.getDietaryRestrictions()).isEqualTo("Vegan");
         }
@@ -852,7 +692,7 @@ class MemberTest {
         void shouldRejectClearingEmailWithoutGuardianCoverage() {
             Member member = createAdultMember();
 
-            assertThatThrownBy(() -> member.update(
+            assertThatThrownBy(() -> update(member, 
                     MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).email(null).build()))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("At least one email address is required");
@@ -863,7 +703,7 @@ class MemberTest {
         void shouldPreservePersonalInfoFieldsWhenNotProvided() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .email(EmailAddress.of("changed@example.com"))
                     .build());
 
@@ -878,15 +718,15 @@ class MemberTest {
         void shouldPreserveExistingValuesWhenNullPassed() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).build());
 
             assertThat(member.getEmail().value()).isEqualTo("jan.novak@example.com");
             assertThat(member.getPhone().value()).isEqualTo("+420123456789");
         }
 
         @Test
-        @DisplayName("should reject update on minor without guardian")
-        void shouldRejectUpdateOnMinorWithoutGuardian() {
+        @DisplayName("should allow unrelated update on already-incomplete minor without guardian (never-worsen)")
+        void shouldAllowUnrelatedUpdateOnMinorAlreadyMissingGuardian() {
             Member minorWithoutGuardian = aMember()
                     .withRegistrationNumber("ZBM1002")
                     .withName("Anna", "Malá")
@@ -897,14 +737,15 @@ class MemberTest {
                     .withEmail("guardian@example.com")
                     .withPhone("+420222000222")
                     .withBirthNumber("015315/1234")
-                    .withNoGuardian()
                     .build();
+            assertThat(missing(minorWithoutGuardian)).containsExactly(MissingDataItem.GUARDIAN);
 
-            assertThatThrownBy(() -> minorWithoutGuardian.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minorWithoutGuardian))
+            update(minorWithoutGuardian, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minorWithoutGuardian))
                     .address(Address.of("Nová 5", "Brno", "60200", "CZ"))
-                    .build()))
-                    .isInstanceOf(BusinessRuleViolationException.class)
-                    .hasMessageContaining("Guardian is required for minors");
+                    .build());
+
+            assertThat(minorWithoutGuardian.getAddress().street()).isEqualTo("Nová 5");
+            assertThat(missing(minorWithoutGuardian)).containsExactly(MissingDataItem.GUARDIAN);
         }
 
     }
@@ -924,7 +765,6 @@ class MemberTest {
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
                     .withBirthNumber("900515/1234")
-                    .withNoGuardian()
                     .build();
         }
 
@@ -933,7 +773,7 @@ class MemberTest {
         void shouldUpdateFirstNameWhenProvided() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).firstName("Petr").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).firstName("Petr").build());
 
             assertThat(member.getFirstName()).isEqualTo("Petr");
             assertThat(member.getLastName()).isEqualTo("Novák");
@@ -944,7 +784,7 @@ class MemberTest {
         void shouldUpdateLastNameWhenProvided() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).lastName("Svoboda").build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).lastName("Svoboda").build());
 
             assertThat(member.getLastName()).isEqualTo("Svoboda");
             assertThat(member.getFirstName()).isEqualTo("Jan");
@@ -956,7 +796,7 @@ class MemberTest {
             Member member = createAdultMember();
             LocalDate newDob = LocalDate.of(1985, 3, 20);
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dateOfBirth(newDob).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).dateOfBirth(newDob).build());
 
             assertThat(member.getDateOfBirth()).isEqualTo(newDob);
         }
@@ -966,7 +806,7 @@ class MemberTest {
         void shouldUpdateGenderWhenProvided() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).gender(Gender.FEMALE).build());
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).gender(Gender.FEMALE).build());
 
             assertThat(member.getGender()).isEqualTo(Gender.FEMALE);
         }
@@ -978,7 +818,7 @@ class MemberTest {
             EmailAddress newEmail = EmailAddress.of("admin.set@example.com");
             PhoneNumber newPhone = PhoneNumber.of("+420111222333");
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .email(newEmail)
                     .phone(newPhone)
                     .build());
@@ -992,7 +832,7 @@ class MemberTest {
         void shouldPreserveUnchangedFieldsWhenUpdatingAdminOnlyFields() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .firstName("Petr")
                     .lastName("Svoboda")
                     .build());
@@ -1003,16 +843,51 @@ class MemberTest {
         }
 
         @Test
-        @DisplayName("should reject dateOfBirth update that makes member a minor without providing a guardian")
-        void shouldRejectDateOfBirthUpdateThatMakesMemberMinorWithoutGuardian() {
+        @DisplayName("should allow dateOfBirth update that makes member a minor and mark the data incomplete")
+        void shouldAllowDateOfBirthUpdateThatMakesMemberMinor() {
             Member member = createAdultMember();
             LocalDate minorDateOfBirth = LocalDate.now().minusYears(10);
 
-            assertThatThrownBy(() -> member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .dateOfBirth(minorDateOfBirth)
-                    .build()))
-                    .isInstanceOf(BusinessRuleViolationException.class)
-                    .hasMessageContaining("Guardian is required for minors");
+                    .build());
+
+            assertThat(member.getDateOfBirth()).isEqualTo(minorDateOfBirth);
+            assertThat(member.isDataIncomplete()).isTrue();
+        }
+
+        @Test
+        @DisplayName("should allow clearing the email of a minor whose legal guardians have contacts")
+        void shouldAllowClearingEmailOfMinorCoveredByGuardians() {
+            Member minor = aMember()
+                    .withDateOfBirth(LocalDate.now().minusYears(10))
+                    .withNationality("SK")
+                    .withEmail("anna@example.com")
+                    .withPhone("+420123456789")
+                    .build();
+
+            minor.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minor)).email(null).build(),
+                    new GuardianContacts(true, true, true));
+
+            assertThat(minor.getEmail()).isNull();
+            assertThat(minor.isDataIncomplete()).isFalse();
+        }
+
+        @Test
+        @DisplayName("should reject clearing the email of a minor without a guardian with contacts")
+        void shouldRejectClearingEmailOfMinorWithoutGuardianCoverage() {
+            Member minor = aMember()
+                    .withDateOfBirth(LocalDate.now().minusYears(10))
+                    .withNationality("SK")
+                    .withEmail("anna@example.com")
+                    .withPhone("+420123456789")
+                    .build();
+
+            assertThatThrownBy(() -> minor.update(
+                    MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minor)).email(null).build(),
+                    new GuardianContacts(true, false, true)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("At least one email address is required");
         }
 
         @Test
@@ -1027,10 +902,9 @@ class MemberTest {
                     .withAddress(Address.of("Hlavní 123", "Bratislava", "81102", "SK"))
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
-                    .withNoGuardian()
                     .build();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .birthNumber(BirthNumber.of("9005151234"))
                     .build());
 
@@ -1042,7 +916,7 @@ class MemberTest {
         void shouldAllowSettingBirthNumberOnCzechMember() {
             Member member = createAdultMember();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .birthNumber(BirthNumber.of("9005151234"))
                     .build());
 
@@ -1061,10 +935,9 @@ class MemberTest {
                     .withAddress(Address.of("Hlavní 123", "Bratislava", "81102", "SK"))
                     .withEmail("jan.novak@example.com")
                     .withPhone("+420123456789")
-                    .withNoGuardian()
                     .build();
 
-            assertThatThrownBy(() -> member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+            assertThatThrownBy(() -> update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
                     .nationality("CZ")
                     .build()))
                     .isInstanceOf(BusinessRuleViolationException.class)
@@ -1072,23 +945,10 @@ class MemberTest {
         }
 
         @Test
-        @DisplayName("should allow update when guardian provides email coverage")
-        void shouldAllowUpdateWhenGuardianProvidesEmailCoverage() {
-            Member member = createAdultMember();
-
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
-                    .email(EmailAddress.of("temp@example.com"))
-                    .guardian(new GuardianInformation("Jane", "Doe", "PARENT",
-                            EmailAddress.of("jane@example.com"), PhoneNumber.of("+420111222333")))
-                    .build());
-
-            assertThat(member.getEmail()).isEqualTo(EmailAddress.of("temp@example.com"));
-        }
-
-        @Test
-        @DisplayName("should reject update on existing minor without guardian")
-        void shouldRejectUpdateOnExistingMinorWithoutGuardian() {
-            // Minor reconstructed without guardian (data integrity gap from legacy import)
+        @DisplayName("should allow unrelated update on existing minor already missing guardian (never-worsen)")
+        void shouldAllowUnrelatedUpdateOnExistingMinorAlreadyMissingGuardian() {
+            // Minor reconstructed without guardian (data integrity gap from legacy import) — an
+            // incomplete member (design.md D5) may still be saved with unrelated changes.
             Member minorWithoutGuardian = aMember()
                     .withRegistrationNumber("ZBM1001")
                     .withName("Jana", "Malá")
@@ -1099,25 +959,20 @@ class MemberTest {
                     .withEmail("guardian@example.com")
                     .withPhone("+420111000111")
                     .withBirthNumber("015315/1234")
-                    .withNoGuardian()
                     .build();
 
-            assertThatThrownBy(() -> minorWithoutGuardian.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minorWithoutGuardian))
+            update(minorWithoutGuardian, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(minorWithoutGuardian))
                     .chipNumber("NEW_CHIP")
-                    .build()))
-                    .isInstanceOf(BusinessRuleViolationException.class)
-                    .hasMessageContaining("Guardian is required for minors");
+                    .build());
+
+            assertThat(minorWithoutGuardian.getChipNumber()).isEqualTo("NEW_CHIP");
+            assertThat(missing(minorWithoutGuardian)).containsExactly(MissingDataItem.GUARDIAN);
         }
     }
 
     @Nested
     @DisplayName("Contact information cross-validation")
     class ContactInformationCrossValidation {
-
-        private GuardianInformation aGuardian() {
-            return new GuardianInformation("Petr", "Novák", "PARENT",
-                    EmailAddress.of("petr@example.com"), PhoneNumber.of("+420987654321"));
-        }
 
         @Test
         @DisplayName("adult member without email at creation should fail with exact message")
@@ -1156,89 +1011,313 @@ class MemberTest {
         }
 
         @Test
-        @DisplayName("minor with only guardian email and phone at creation should succeed")
-        void minorWithOnlyGuardianContactAtCreationShouldSucceed() {
-            LocalDate dateOfBirth = LocalDate.now().minusYears(12);
-            int birthYear = dateOfBirth.getYear() % 100;
-            MemberId memberId = new MemberId(UUID.randomUUID());
-            PersonalInformation personalInfo = PersonalInformation.of(
-                    "Anna", "Nováková", dateOfBirth, "CZ", Gender.FEMALE);
-
-            Member member = Member.register(MemberRegisterMemberBuilder.builder()
-                    .id(memberId)
-                    .registrationNumber(new RegistrationNumber("ZBM%02d01".formatted(birthYear)))
-                    .personalInformation(personalInfo)
-                    .address(Address.of("Ulice 1", "Praha", "11000", "CZ"))
-                    .guardian(aGuardian())
-                    .birthNumber(BirthNumber.of("015315/1234"))
-                    .build());
-
-            assertThat(member.getGuardian()).isNotNull();
-            assertThat(member.getEmail()).isNull();
-            assertThat(member.getPhone()).isNull();
-        }
-
-        @Test
-        @DisplayName("update that sets new email when guardian exists should succeed")
-        void updateSettingNewEmailWhenGuardianExistsShouldSucceed() {
+        @DisplayName("update that clears email on a complete member should fail")
+        void updateClearingEmailOnCompleteMemberShouldFail() {
             Member member = aMember()
-                    .withNationality("SK")
                     .withEmail("jan@example.com")
                     .withPhone("+420123456789")
-                    .withGuardian(aGuardian())
                     .build();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
-                    .email(EmailAddress.of("new@example.com"))
-                    .build());
-
-            assertThat(member.getEmail()).isEqualTo(EmailAddress.of("new@example.com"));
-        }
-
-        @Test
-        @DisplayName("update that would leave no email when no guardian should fail")
-        void updateLeavingNoEmailAndNoGuardianShouldFail() {
-            EmailAddress noEmail = null;
-            Member memberWithNoEmail = aMember()
-                    .withEmail(noEmail)
-                    .withPhone("+420123456789")
-                    .withNoGuardian()
-                    .build();
-
-            assertThatThrownBy(() -> memberWithNoEmail.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoEmail)).build()))
+            assertThatThrownBy(() -> update(member, 
+                    MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).email(null).build()))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("At least one email address is required (member or guardian)");
         }
 
         @Test
-        @DisplayName("update that would leave no phone when no guardian should fail")
-        void updateLeavingNoPhoneAndNoGuardianShouldFail() {
-            PhoneNumber noPhone = null;
-            Member memberWithNoPhone = aMember()
+        @DisplayName("update that clears phone on a complete member should fail")
+        void updateClearingPhoneOnCompleteMemberShouldFail() {
+            Member member = aMember()
                     .withEmail("jan@example.com")
-                    .withPhone(noPhone)
-                    .withNoGuardian()
+                    .withPhone("+420123456789")
                     .build();
 
-            assertThatThrownBy(() -> memberWithNoPhone.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoPhone)).build()))
+            assertThatThrownBy(() -> update(member, 
+                    MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).phone(null).build()))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("At least one phone number is required (member or guardian)");
         }
 
         @Test
-        @DisplayName("member with no email but guardian email should pass update validation")
-        void memberWithNoEmailButGuardianEmailShouldPassUpdateValidation() {
-            EmailAddress noEmail = null;
+        @DisplayName("update that clears address on a complete member should fail")
+        void updateClearingAddressOnCompleteMemberShouldFail() {
             Member member = aMember()
-                    .withNationality("SK")
-                    .withEmail(noEmail)
+                    .withEmail("jan@example.com")
                     .withPhone("+420123456789")
-                    .withGuardian(aGuardian())
                     .build();
 
-            member.update(MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).build());
+            assertThatThrownBy(() -> update(member, 
+                    MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member)).address(null).build()))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Address is required");
+        }
 
-            assertThat(member.getGuardian()).isNotNull();
+        @Test
+        @DisplayName("unrelated update on member already missing address should succeed (never-worsen)")
+        void unrelatedUpdateOnMemberAlreadyMissingAddressShouldSucceed() {
+            Address noAddress = null;
+            Member memberWithNoAddress = aMember()
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withEmail("jan@example.com")
+                    .withPhone("+420123456789")
+                    .withAddress(noAddress)
+                    .build();
+
+            update(memberWithNoAddress, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoAddress))
+                    .dietaryRestrictions("Vegan")
+                    .build());
+
+            assertThat(memberWithNoAddress.getDietaryRestrictions()).isEqualTo("Vegan");
+            assertThat(missing(memberWithNoAddress)).containsExactly(MissingDataItem.ADDRESS);
+        }
+
+        @Test
+        @DisplayName("unrelated update on member already missing email should succeed (never-worsen)")
+        void unrelatedUpdateOnMemberAlreadyMissingEmailShouldSucceed() {
+            EmailAddress noEmail = null;
+            Member memberWithNoEmail = aMember()
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withEmail(noEmail)
+                    .withPhone("+420123456789")
+                    .build();
+
+            update(memberWithNoEmail, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoEmail))
+                    .dietaryRestrictions("Vegan")
+                    .build());
+
+            assertThat(memberWithNoEmail.getDietaryRestrictions()).isEqualTo("Vegan");
+            assertThat(missing(memberWithNoEmail)).containsExactly(MissingDataItem.EMAIL);
+        }
+
+        @Test
+        @DisplayName("unrelated update on member already missing phone should succeed (never-worsen)")
+        void unrelatedUpdateOnMemberAlreadyMissingPhoneShouldSucceed() {
+            PhoneNumber noPhone = null;
+            Member memberWithNoPhone = aMember()
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withEmail("jan@example.com")
+                    .withPhone(noPhone)
+                    .build();
+
+            update(memberWithNoPhone, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoPhone))
+                    .dietaryRestrictions("Vegan")
+                    .build());
+
+            assertThat(memberWithNoPhone.getDietaryRestrictions()).isEqualTo("Vegan");
+            assertThat(missing(memberWithNoPhone)).containsExactly(MissingDataItem.PHONE);
+        }
+
+        @Test
+        @DisplayName("incomplete member can fill in the missing item it was lacking")
+        void incompleteMemberCanFillInMissingEmail() {
+            EmailAddress noEmail = null;
+            Member memberWithNoEmail = aMember()
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withEmail(noEmail)
+                    .withPhone("+420123456789")
+                    .build();
+
+            update(memberWithNoEmail, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoEmail))
+                    .email(EmailAddress.of("filled@example.com"))
+                    .build());
+
+            assertThat(memberWithNoEmail.getEmail()).isEqualTo(EmailAddress.of("filled@example.com"));
+            assertThat(missing(memberWithNoEmail).isEmpty()).isTrue();
+        }
+
+        @Test
+        @DisplayName("incomplete member cannot lose an additional item")
+        void incompleteMemberCannotLoseAdditionalItem() {
+            EmailAddress noEmail = null;
+            Member memberWithNoEmail = aMember()
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withEmail(noEmail)
+                    .withPhone("+420123456789")
+                    .build();
+            assertThat(missing(memberWithNoEmail)).containsExactly(MissingDataItem.EMAIL);
+
+            assertThatThrownBy(() -> update(memberWithNoEmail, 
+                    MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(memberWithNoEmail)).phone(null).build()))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("At least one phone number is required (member or guardian)");
+        }
+
+    }
+
+    @Nested
+    @DisplayName("handle(SyncFromOris) command")
+    class HandleSyncFromOris {
+
+        private Member createAdultMemberWithAllOptionalFieldsSet() {
+            Member member = aMember()
+                    .withRegistrationNumber("ZBM9001")
+                    .withName("Jan", "Novák")
+                    .withDateOfBirth(LocalDate.of(1990, 5, 15))
+                    .withNationality("CZ")
+                    .withGender(Gender.MALE)
+                    .withAddress(Address.of("Hlavní 123", "Praha", "11000", "CZ"))
+                    .withEmail("jan.novak@example.com")
+                    .withPhone("+420123456789")
+                    .withBirthNumber("900515/1234")
+                    .build();
+
+            update(member, MemberUpdateMemberBuilder.builder(Member.UpdateMember.from(member))
+                    .chipNumber("999")
+                    .identityCard(IdentityCard.of("123456789", LocalDate.of(2030, 1, 1)))
+                    .drivingLicenseGroup(DrivingLicenseGroup.B)
+                    .medicalCourse(MedicalCourse.of(LocalDate.of(2020, 1, 1), java.util.Optional.of(LocalDate.of(2030, 1, 1))))
+                    .trainerLicense(TrainerLicense.of(TrainerLevel.T1, LocalDate.of(2030, 1, 1)))
+                    .refereeLicense(RefereeLicense.of(RefereeLevel.R1, LocalDate.of(2030, 1, 1)))
+                    .dietaryRestrictions("Vegan")
+                    .bankAccountNumber(BankAccountNumber.of("12345/5678"))
+                    .build());
+
+            UserId adminUserId = new UserId(UUID.randomUUID());
+            member.suspend(MemberSuspendMembershipBuilder.builder()
+                    .suspendedBy(adminUserId)
+                    .reason(DeactivationReason.ODHLASKA)
+                    .note("Some note")
+                    .build());
+
+            return member;
+        }
+
+        private Member.SyncFromOris syncCommandFor(Member member) {
+            return MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(member.getRegistrationNumber())
+                    .firstName("Petr")
+                    .lastName("Svoboda")
+                    .dateOfBirth(LocalDate.of(1985, 3, 20))
+                    .gender(Gender.FEMALE)
+                    .nationality(new Nationality("SK"))
+                    .birthNumber(null)
+                    .email(EmailAddress.of("petr.svoboda@example.com"))
+                    .phone(PhoneNumber.of("+420999888777"))
+                    .address(Address.of("Nová 1", "Brno", "60200", "CZ"))
+                    .chipNumber("111")
+                    .build();
+        }
+
+        @Test
+        @DisplayName("should update every ORIS-owned field")
+        void shouldUpdateEveryOrisOwnedField() {
+            Member member = createAdultMemberWithAllOptionalFieldsSet();
+            Member.SyncFromOris command = syncCommandFor(member);
+
+            member.syncFromOris(command);
+
+            assertThat(member.getFirstName()).isEqualTo("Petr");
+            assertThat(member.getLastName()).isEqualTo("Svoboda");
+            assertThat(member.getDateOfBirth()).isEqualTo(LocalDate.of(1985, 3, 20));
+            assertThat(member.getGender()).isEqualTo(Gender.FEMALE);
+            assertThat(member.getNationality()).isEqualTo("SK");
+            assertThat(member.getBirthNumber()).isNull();
+            assertThat(member.getEmail()).isEqualTo(EmailAddress.of("petr.svoboda@example.com"));
+            assertThat(member.getPhone()).isEqualTo(PhoneNumber.of("+420999888777"));
+            assertThat(member.getAddress()).isEqualTo(Address.of("Nová 1", "Brno", "60200", "CZ"));
+            assertThat(member.getChipNumber()).isEqualTo("111");
+        }
+
+        @Test
+        @DisplayName("should leave Klabis-owned fields untouched")
+        void shouldLeaveKlabisOwnedFieldsUntouched() {
+            Member member = createAdultMemberWithAllOptionalFieldsSet();
+            Member.SyncFromOris command = syncCommandFor(member);
+
+            member.syncFromOris(command);
+
+            assertThat(member.getIdentityCard()).isEqualTo(IdentityCard.of("123456789", LocalDate.of(2030, 1, 1)));
+            assertThat(member.getDrivingLicenseGroup()).isEqualTo(DrivingLicenseGroup.B);
+            assertThat(member.getMedicalCourse()).isEqualTo(MedicalCourse.of(LocalDate.of(2020, 1, 1), java.util.Optional.of(LocalDate.of(2030, 1, 1))));
+            assertThat(member.getTrainerLicense()).isEqualTo(TrainerLicense.of(TrainerLevel.T1, LocalDate.of(2030, 1, 1)));
+            assertThat(member.getRefereeLicense()).isEqualTo(RefereeLicense.of(RefereeLevel.R1, LocalDate.of(2030, 1, 1)));
+            assertThat(member.getDietaryRestrictions()).isEqualTo("Vegan");
+            assertThat(member.getBankAccountNumber()).isEqualTo(BankAccountNumber.of("12345/5678"));
+
+            assertThat(member.isActive()).isFalse();
+            assertThat(member.getSuspensionReason()).isEqualTo(DeactivationReason.ODHLASKA);
+            assertThat(member.getSuspensionNote()).isEqualTo("Some note");
+            assertThat(member.getSuspendedAt()).isNotNull();
+            assertThat(member.getSuspendedBy()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("should not publish BirthNumberAccessedEvent even when birth number changes")
+        void shouldNotPublishBirthNumberAccessedEventEvenWhenBirthNumberChanges() {
+            Member member = createAdultMemberWithAllOptionalFieldsSet();
+            member.clearDomainEvents();
+
+            Member.SyncFromOris command = MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(member.getRegistrationNumber())
+                    .firstName(member.getFirstName())
+                    .lastName(member.getLastName())
+                    .dateOfBirth(member.getDateOfBirth())
+                    .gender(member.getGender())
+                    .nationality(new Nationality("CZ"))
+                    .birthNumber(BirthNumber.of("850320/1234"))
+                    .email(member.getEmail())
+                    .phone(member.getPhone())
+                    .address(member.getAddress())
+                    .chipNumber(member.getChipNumber())
+                    .build();
+
+            member.syncFromOris(command);
+
+            assertThat(member.getBirthNumber()).isEqualTo(BirthNumber.of("850320/1234"));
+            assertThat(member.getDomainEvents())
+                    .noneMatch(event -> event instanceof BirthNumberAccessedEvent);
+        }
+
+        @Test
+        @DisplayName("accepts ORIS removing the member's only phone or birth number, leaving them incomplete (design.md D5)")
+        void acceptsLosingPhoneOrBirthNumberAndBecomesIncomplete() {
+            Member member = createAdultMemberWithAllOptionalFieldsSet();
+
+            Member.SyncFromOris command = MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(member.getRegistrationNumber())
+                    .firstName(member.getFirstName())
+                    .lastName(member.getLastName())
+                    .dateOfBirth(member.getDateOfBirth())
+                    .gender(member.getGender())
+                    .nationality(new Nationality("CZ"))
+                    .birthNumber(null)
+                    .email(member.getEmail())
+                    .phone(null)
+                    .address(member.getAddress())
+                    .chipNumber(member.getChipNumber())
+                    .build();
+
+            member.syncFromOris(command);
+
+            assertThat(member.getPhone()).isNull();
+            assertThat(member.getBirthNumber()).isNull();
+            assertThat(missing(member)).containsExactlyInAnyOrder(
+                    MissingDataItem.PHONE, MissingDataItem.BIRTH_NUMBER);
+            assertThat(missing(member).isEmpty()).isFalse();
+        }
+
+        @Test
+        @DisplayName("still refuses a birth number for a non-Czech national (consistency rule)")
+        void stillRefusesBirthNumberForNonCzechNational() {
+            Member member = createAdultMemberWithAllOptionalFieldsSet();
+
+            Member.SyncFromOris command = MemberSyncFromOrisBuilder.builder()
+                    .registrationNumber(member.getRegistrationNumber())
+                    .firstName(member.getFirstName())
+                    .lastName(member.getLastName())
+                    .dateOfBirth(member.getDateOfBirth())
+                    .gender(member.getGender())
+                    .nationality(new Nationality("SK"))
+                    .birthNumber(BirthNumber.of("850320/1234"))
+                    .email(member.getEmail())
+                    .phone(member.getPhone())
+                    .address(member.getAddress())
+                    .chipNumber(member.getChipNumber())
+                    .build();
+
+            assertThatThrownBy(() -> member.syncFromOris(command))
+                    .isInstanceOf(BusinessRuleViolationException.class)
+                    .hasMessageContaining("Birth number is only allowed for Czech nationals");
         }
     }
 
@@ -1253,7 +1332,6 @@ class MemberTest {
                     .withDateOfBirth(LocalDate.of(1990, 1, 1))
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings()).isEmpty();
@@ -1268,7 +1346,6 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("900101/1235")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings()).isEmpty();
@@ -1283,7 +1360,6 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("900101/1235")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings())
@@ -1300,7 +1376,6 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("905101/1239")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings())
@@ -1317,7 +1392,6 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("905101/1239")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings()).hasSize(2);
@@ -1332,7 +1406,6 @@ class MemberTest {
                     .withGender(Gender.FEMALE)
                     .withNationality("CZ")
                     .withBirthNumber("905115/1239")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings()).isEmpty();
@@ -1347,7 +1420,6 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("000101/1235")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings()).isEmpty();
@@ -1363,12 +1435,19 @@ class MemberTest {
                     .withGender(Gender.MALE)
                     .withNationality("CZ")
                     .withBirthNumber("800515/1235")
-                    .withNoGuardian()
                     .build();
 
             assertThat(member.birthNumberConsistencyWarnings())
                     .hasSize(1)
                     .first().asString().contains("does not match member's date of birth");
         }
+    }
+
+    private static void update(Member member, Member.UpdateMember command) {
+        member.update(command, GuardianContacts.NONE);
+    }
+
+    private static Set<MissingDataItem> missing(Member member) {
+        return MemberCompleteness.missingData(member, GuardianContacts.NONE);
     }
 }

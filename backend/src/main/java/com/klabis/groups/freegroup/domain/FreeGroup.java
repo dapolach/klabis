@@ -1,10 +1,11 @@
 package com.klabis.groups.freegroup.domain;
 
+import com.klabis.common.authorization.TargetType;
 import com.klabis.common.domain.AuditMetadata;
-import com.klabis.groups.common.domain.CannotPromoteNonMemberToOwnerException;
-import com.klabis.groups.common.domain.DirectMemberAdditionNotAllowedException;
-import com.klabis.groups.common.domain.GroupMembership;
-import com.klabis.groups.common.domain.MemberGroup;
+import com.klabis.common.groups.domain.DirectMemberAdditionNotAllowedException;
+import com.klabis.common.groups.domain.GroupMembership;
+import com.klabis.common.groups.domain.MemberGroup;
+import com.klabis.common.users.Authority;
 import com.klabis.groups.freegroup.FreeGroupId;
 import com.klabis.groups.freegroup.FreeGroupInvitationCancelledEvent;
 import com.klabis.members.MemberId;
@@ -15,45 +16,82 @@ import org.springframework.util.Assert;
 
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @AggregateRoot
-public class FreeGroup extends MemberGroup<FreeGroup, FreeGroupId> implements WithInvitations {
+public class FreeGroup extends MemberGroup<FreeGroup, FreeGroupId, MemberId> implements WithInvitations {
 
     public static final String TYPE_DISCRIMINATOR = "FREE";
+
+    private static final Set<Authority> DELEGATABLE_AUTHORITIES = Collections.unmodifiableSet(
+            Authority.holdableOverTargets().stream()
+                    .filter(authority -> authority.getTargetType() == TargetType.MEMBER)
+                    .collect(Collectors.toCollection(() -> EnumSet.noneOf(Authority.class))));
 
     @Identity
     private final FreeGroupId id;
     private final Set<Invitation> invitations;
+    private final Set<Authority> delegatedAuthorities;
 
     private FreeGroup(FreeGroupId id, String name, Set<MemberId> owners,
-                      Set<GroupMembership> members, Set<Invitation> invitations) {
+                      Set<GroupMembership<MemberId>> members, Set<Invitation> invitations,
+                      Set<Authority> delegatedAuthorities) {
         super(name, owners, members);
         Assert.notNull(id, "FreeGroupId is required");
         Assert.notNull(invitations, "Invitations set is required");
+        Assert.notNull(delegatedAuthorities, "Delegated authorities are required");
+        // Guards the aggregate itself, so a client bypassing the create form cannot delegate an administrator authority.
+        delegatedAuthorities.stream()
+                .filter(authority -> !DELEGATABLE_AUTHORITIES.contains(authority))
+                .findFirst()
+                .ifPresent(authority -> {
+                    throw new InvalidDelegatedAuthorityException(authority);
+                });
         this.id = id;
         this.invitations = new HashSet<>(invitations);
+        this.delegatedAuthorities = delegatedAuthorities.isEmpty()
+                ? Collections.emptySet()
+                : Collections.unmodifiableSet(EnumSet.copyOf(delegatedAuthorities));
+    }
+
+    /**
+     * The authorities a founder may choose to delegate: those that can be held over specific members.
+     */
+    public static Set<Authority> delegatableAuthorities() {
+        return DELEGATABLE_AUTHORITIES;
     }
 
     @RecordBuilder
-    public record CreateFreeGroup(String name, MemberId creator) {
+    public record CreateFreeGroup(String name, MemberId creator, Set<Authority> delegatedAuthorities) {
         public CreateFreeGroup {
             Assert.hasText(name, "Group name is required");
             Assert.notNull(creator, "Creator is required");
+            Assert.notNull(delegatedAuthorities, "Delegated authorities are required");
+            delegatedAuthorities = Set.copyOf(delegatedAuthorities);
         }
     }
 
     public static FreeGroup create(CreateFreeGroup command) {
         FreeGroupId id = new FreeGroupId(UUID.randomUUID());
-        return new FreeGroup(id, command.name(), Set.of(command.creator()),
-                Set.of(GroupMembership.of(command.creator())), Set.of());
+        return new FreeGroup(id, command.name(), Set.of(command.creator()), Set.of(), Set.of(),
+                command.delegatedAuthorities());
     }
 
     public static FreeGroup reconstruct(FreeGroupId id, String name, Set<MemberId> owners,
-                                        Set<GroupMembership> members, Set<Invitation> invitations,
-                                        AuditMetadata auditMetadata) {
-        FreeGroup group = new FreeGroup(id, name, owners, members, invitations);
+                                        Set<GroupMembership<MemberId>> members, Set<Invitation> invitations,
+                                        Set<Authority> delegatedAuthorities, AuditMetadata auditMetadata) {
+        FreeGroup group = new FreeGroup(id, name, owners, members, invitations, delegatedAuthorities);
         group.updateAuditMetadata(auditMetadata);
         return group;
+    }
+
+    /**
+     * Fixed at creation: members agree to what the owners may do with their data when they join, so the set
+     * must not widen afterwards.
+     */
+    @Override
+    public Set<Authority> delegatedAuthorities() {
+        return Set.copyOf(delegatedAuthorities);
     }
 
     @Override
@@ -81,9 +119,15 @@ public class FreeGroup extends MemberGroup<FreeGroup, FreeGroupId> implements Wi
         removeOwner(memberId);
     }
 
+    /**
+     * Removing a member is an owner action; a member may also remove themselves to leave the group.
+     * Owners never reach this path — they give up ownership via {@link #removeOwner}.
+     */
     public void removeMember(MemberId memberId, MemberId actingMember) {
         Assert.notNull(memberId, "MemberId is required");
-        requireOwner(actingMember);
+        if (!memberId.equals(actingMember)) {
+            requireOwner(actingMember);
+        }
         removeMember(memberId);
     }
 
@@ -119,8 +163,9 @@ public class FreeGroup extends MemberGroup<FreeGroup, FreeGroupId> implements Wi
     public void acceptInvitation(InvitationId invitationId) {
         Assert.notNull(invitationId, "invitationId is required");
         Invitation invitation = findPendingInvitation(invitationId);
-        invitation.accept();
+        // Membership first: addMember rejects an owner, and a half-accepted invitation is not a state to persist.
         super.addMember(invitation.getInvitedMember());
+        invitation.accept();
     }
 
     public void acceptInvitation(InvitationId invitationId, MemberId acceptingMember) {

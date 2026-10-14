@@ -3,14 +3,14 @@ import {PermissionsDialog} from "../../components/members/PermissionsDialog";
 import {usePermissionsEditor} from "../../hooks/usePermissionsEditor.ts";
 import {Link, useLocation, useNavigate} from "react-router-dom";
 import {useHalPageData} from "../../hooks/useHalPageData.ts";
-import {Badge, Button, DetailRow, Modal, Skeleton} from "../../components/UI";
+import {Alert, Badge, Button, DetailRow, Modal, Skeleton} from "../../components/UI";
 import {ErrorPage} from "../ErrorPage.tsx";
 import {HalFormButton} from "../../components/HalNavigator2/HalFormButton.tsx";
 import {type FormRenderHelpers} from "../../components/HalNavigator2/halforms";
 import {formatDate} from "../../utils/dateUtils.ts";
 import type {GetMemberHal, GetMemberResource, HalFormsTemplate} from "../../api";
 import {HalFormDisplay} from "../../components/HalNavigator2/HalFormDisplay.tsx";
-import {Banknote, Check, Dumbbell, Heart, KeyRound, Pencil, Shield, UserX} from "lucide-react";
+import {Banknote, Check, Dumbbell, Heart, KeyRound, Pencil, Shield, UserPlus, UserX} from "lucide-react";
 import {Section} from "./MemberSection";
 import {BirthNumberConditionalField} from "./BirthNumberConditionalField";
 import {isCzNationality} from "./isCzNationality";
@@ -22,6 +22,8 @@ import {useInlineEditing} from "../../hooks/useInlineEditing.ts";
 import {CalendarFeedSection} from "./CalendarFeedSection.tsx";
 import {MemberFeeSection} from "./MemberFeeSection.tsx";
 import {ChangePasswordDialog} from "../../components/auth/ChangePasswordDialog.tsx";
+import {LegalGuardiansSection} from "../../components/legal-guardians/LegalGuardiansSection.tsx";
+import {SyncStatusIndicator} from "../../components/sync/SyncStatusIndicator.tsx";
 
 type MemberDetail = GetMemberResource;
 
@@ -51,10 +53,6 @@ const MaskedBirthNumber = ({value}: { value: string }) => {
             </button>
         </span>
     );
-};
-
-const MEMBER_FIELD_TYPES: Record<string, string> = {
-    gender: 'Gender',
 };
 
 export const MemberDetailPage = (): ReactElement => {
@@ -87,6 +85,7 @@ interface MemberDetailContentProps {
 const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = false}: MemberDetailContentProps) => {
     const [isPermissionsDialogOpen, setIsPermissionsDialogOpen] = useState(false);
     const [suspendMemberModal, setSuspendMemberModal] = useState(false);
+    const [accountActivationModal, setAccountActivationModal] = useState(false);
 
     const {
         suspensionWarning,
@@ -110,12 +109,13 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
 
     const member = resourceData;
     const address = member.address;
-    const guardian = member.guardian;
     const identityCard = member.identityCard;
     const medicalCourse = member.medicalCourse;
     const trainerLicense = member.trainerLicense;
     const refereeLicense = member.refereeLicense;
     const showDeactivation = member.active === false;
+    const setGuardiansTemplate = resourceData._templates?.setMemberLegalGuardians ?? null;
+    const showGuardiansSection = !!resourceData._links?.legalGuardians || setGuardiansTemplate !== null;
 
     const extractLinkHref = (link: unknown): string | null => {
         if (!link) return null;
@@ -129,17 +129,18 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
     const template: HalFormsTemplate | null = resourceData?._templates?.updateMember ?? null;
     const hasEditTemplate = template !== null;
 
-    const {isEditing, enrichedTemplate, enrichedFieldNames, startEditing, cancelEditing, postprocessPayload} =
+    const {isEditing, enrichedTemplate, enrichedFieldNames, editableFieldNames, startEditing, cancelEditing, postprocessPayload} =
         useInlineEditing(template, resourceData as Record<string, unknown>, {
             initialEditing,
-            fieldTypeOverrides: MEMBER_FIELD_TYPES,
             onCancel: initialEditing ? () => navigate(-1) : undefined,
         });
 
-
     const renderContent = (helpers?: FormRenderHelpers) => {
+        // Only fields editable in the original template render as inputs; fields synthesised
+        // as read-only (e.g. gender for a self-editing member without MEMBERS:MANAGE) fall
+        // through to the caller's `?? val(...)` formatted display branch.
         const ri = (name: string): ReactNode =>
-            isEditing && enrichedFieldNames.has(name) && helpers
+            isEditing && editableFieldNames.has(name) && helpers
                 ? helpers.renderInput(name)
                 : null;
 
@@ -153,7 +154,12 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                         <DetailRow label={labels.fields.gender}>{ri('gender') ?? val(member.gender && getEnumLabel('gender', member.gender))}</DetailRow>
                         <DetailRow label={labels.fields.nationality}>{ri('nationality') ?? val(member.nationality)}</DetailRow>
                         {isEditing
-                            ? enrichedFieldNames.has('birthNumber') && <BirthNumberConditionalField renderInput={ri}/>
+                            ? enrichedFieldNames.has('birthNumber') && (
+                                <BirthNumberConditionalField
+                                    renderInput={ri}
+                                    fallback={val(member.birthNumber && <MaskedBirthNumber value={member.birthNumber}/>)}
+                                />
+                            )
                             : (isCzNationality(member.nationality) && member.birthNumber && (
                                 <DetailRow label={labels.fields.birthNumber}>
                                     <MaskedBirthNumber value={member.birthNumber}/>
@@ -161,7 +167,7 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                             ))
                         }
                         {isEditing && (
-                            <DetailRow label={labels.fields.registrationNumber}>{ri('registrationNumber')}</DetailRow>
+                            <DetailRow label={labels.fields.registrationNumber}>{ri('registrationNumber') ?? val(member.registrationNumber)}</DetailRow>
                         )}
                     </Section>
                 )}
@@ -273,10 +279,13 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                             <h1 className="text-3xl font-bold text-text-primary">
                                 {member.firstName} {member.lastName}
                             </h1>
-                            {!isEditing && (
+                            {!isEditing && member.active !== undefined && (
                                 <Badge variant={member.active ? 'success' : 'default'} size="sm">
                                     {member.active ? labels.enums.memberStatus.active : labels.enums.memberStatus.inactive}
                                 </Badge>
+                            )}
+                            {!isEditing && (
+                                <SyncStatusIndicator syncLink={resourceData._links?.sync} mode="icon+date"/>
                             )}
                         </div>
                         <span className="text-sm text-text-secondary">{member.registrationNumber}</span>
@@ -320,13 +329,13 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                                     {labels.links.trainingGroup}
                                 </Button>
                             )}
-                            {hasLink(memberRel('familyGroup')) && (
+                            {hasLink(memberRel('legalGuardianGroup')) && (
                                 <Button
                                     variant="secondary"
-                                    onClick={() => route.navigateToResource(route.getResourceLink(memberRel('familyGroup'))!)}
+                                    onClick={() => route.navigateToResource(route.getResourceLink(memberRel('legalGuardianGroup'))!)}
                                     startIcon={<Heart className="w-4 h-4"/>}
                                 >
-                                    {labels.links.familyGroup}
+                                    {labels.links.legalGuardians}
                                 </Button>
                             )}
                             {hasEditTemplate && hasLink(memberRel('permissions')) && (
@@ -348,9 +357,26 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                                 </Button>
                             )}
                             {hasEditTemplate && <HalFormButton name="resumeMember" modal={true}/>}
+                            {resourceData._templates?.sendMemberAccountActivation && (
+                                <Button
+                                    variant="secondary"
+                                    onClick={() => setAccountActivationModal(true)}
+                                    startIcon={<UserPlus className="w-4 h-4"/>}
+                                >
+                                    {labels.templates.sendMemberAccountActivation}
+                                </Button>
+                            )}
                         </div>
                     )}
                 </div>
+
+                {!isEditing && member.missingData && member.missingData.length > 0 && (
+                    <Alert severity="warning">
+                        {labels.memberCompleteness.missingDataWarning(
+                            member.missingData.map((item) => getEnumLabel('missingDataItem', item)).join(', ')
+                        )}
+                    </Alert>
+                )}
 
                 <hr className="border-border"/>
 
@@ -361,18 +387,12 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                     </div>
                 ) : leftColumn}
 
-                {(guardian || (isEditing && enrichedFieldNames.has('guardian'))) && (
-                    <Section title={labels.sections.guardian}>
-                        {isEditing ? ri('guardian') : (
-                            <>
-                                <DetailRow label="Jméno">{val(guardian?.firstName)}</DetailRow>
-                                <DetailRow label="Příjmení">{val(guardian?.lastName)}</DetailRow>
-                                <DetailRow label="Vztah">{val(guardian?.relationship)}</DetailRow>
-                                <DetailRow label="E-mail">{val(guardian?.email)}</DetailRow>
-                                <DetailRow label="Telefon">{val(guardian?.phone)}</DetailRow>
-                            </>
-                        )}
-                    </Section>
+                {showGuardiansSection && (
+                    <LegalGuardiansSection
+                        guardiansLink={resourceData._links?.legalGuardians}
+                        editTemplate={setGuardiansTemplate}
+                        editTemplateName="setMemberLegalGuardians"
+                    />
                 )}
 
                 {showDeactivation && (
@@ -398,7 +418,7 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                     <CalendarFeedSection icalTokenHref={icalTokenHref}/>
                 )}
 
-                {!isEditing && member.active && feeSummaryHref && (
+                {!isEditing && member.active !== false && feeSummaryHref && (
                     <MemberFeeSection
                         feeSummaryHref={feeSummaryHref}
                         memberId={selfMemberId}
@@ -428,6 +448,7 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
     );
 
     const suspendTemplate = resourceData._templates?.suspendMember ?? null;
+    const accountActivationTemplate = resourceData._templates?.sendMemberAccountActivation ?? null;
 
     return (
         <>
@@ -445,6 +466,25 @@ const MemberDetailContent = ({resourceData, hasLink, route, initialEditing = fal
                 onClose={clearNegativeBalanceWarning}
                 warning={negativeBalanceWarning}
             />
+            {accountActivationTemplate && accountActivationModal && (
+                <Modal
+                    isOpen={true}
+                    onClose={() => setAccountActivationModal(false)}
+                    title={labels.dialogTitles.sendMemberAccountActivation}
+                    size="2xl"
+                >
+                    <p className="mb-4 text-text-secondary">{labels.accountActivation.confirm}</p>
+                    <HalFormDisplay
+                        template={accountActivationTemplate}
+                        templateName="sendMemberAccountActivation"
+                        resourceData={resourceData as unknown as Record<string, unknown>}
+                        pathname={route.pathname}
+                        onClose={() => setAccountActivationModal(false)}
+                        successMessage={labels.accountActivation.sent}
+                        submitButtonLabel={labels.templates.sendMemberAccountActivation}
+                    />
+                </Modal>
+            )}
             {suspendTemplate && suspendMemberModal && (
                 <Modal
                     isOpen={true}

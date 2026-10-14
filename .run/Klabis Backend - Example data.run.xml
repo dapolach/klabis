@@ -1,0 +1,37 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Klabis Backend - Example data" type="SpringBootApplicationConfigurationType" factoryName="Spring Boot">
+    <option name="ACTIVE_PROFILES" value="h2,ssl,debug,local-dev,example-data" />
+    <additionalParameters>
+      <param>
+        <option name="enabled" value="true" />
+        <option name="name" value="management.endpoint.env.show-values" />
+        <option name="value" value="when_authorized" />
+      </param>
+    </additionalParameters>
+    <envs>
+      <env name="KLABIS_ENCRYPTION_PASSWORD" value="encryptpass" />
+      <env name="KLABIS_ENCRYPTION_SALT" value="5c0744940b5c369b" />
+      <env name="KLABIS_ADMIN_PASSWORD" value="admin123" />
+      <env name="KLABIS_OAUTH2_CLIENT_SECRET" value="test-secret-123" />
+      <env name="KLABIS_SMTP_HOST" value="localhost" />
+      <env name="KLABIS_SMTP_PORT" value="1025" />
+      <env name="SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH" value="false" />
+      <env name="SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE" value="false" />
+      <env name="SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_REQUIRED" value="false" />
+    </envs>
+    <option name="envFilePaths">
+      <option value="$PROJECT_DIR$/backend/local.env" />
+    </option>
+    <module name="backend.main" />
+    <option name="SPRING_BOOT_MAIN_CLASS" value="com.klabis.KlabisApplication" />
+    <option name="WORKING_DIRECTORY" value="file://$PROJECT_DIR$/backend" />
+    <extension name="software.aws.toolkits.jetbrains.core.execution.JavaAwsConnectionExtension">
+      <option name="credential" />
+      <option name="region" />
+      <option name="useCurrentConnection" value="false" />
+    </extension>
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

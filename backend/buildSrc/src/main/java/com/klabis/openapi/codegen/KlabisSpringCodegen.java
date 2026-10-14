@@ -6,6 +6,7 @@ import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.servers.Server;
+import org.openapitools.codegen.CodegenModel;
 import org.openapitools.codegen.CodegenOperation;
 import org.openapitools.codegen.CodegenProperty;
 import org.openapitools.codegen.CodegenResponse;
@@ -15,13 +16,14 @@ import org.openapitools.codegen.utils.ModelUtils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Klabis-specific fork of the stock {@code spring} OpenAPI generator.
  *
  * <p>Vendor fork, diff on upgrade: this class overrides specific protected/public extension points
- * of {@link SpringCodegen} to teach the generator two Klabis conventions the stock generator has no
- * concept of. Both are read from explicit declarations in the hand-written module spec — the
+ * of {@link SpringCodegen} to teach the generator four Klabis conventions the stock generator has no
+ * concept of. The first two are read from explicit declarations in the hand-written module spec — the
  * generator never sees a HAL envelope schema at all, because {@code tools/openapi-bundle} reconstructs
  * those into {@code klabis-full.json} for the frontend and Swagger UI only. See
  * {@code openspec/changes/derive-hal-envelopes-in-bundler/design.md}.
@@ -37,6 +39,16 @@ import java.util.Map;
  *     resolved the payload type; {@link #fromResponse} suppresses the springdoc {@code @Schema}
  *     doc block for the response, since a generic {@code Page<T>} is not a legal class literal.
  *     Design Decision 2.</li>
+ *     <li><b>{@code x-klabis-halforms-access} + {@code x-hal-input-type}</b> on a property — the
+ *     single {@code @HalForms(...)} annotation both attributes spell is assembled by
+ *     {@link #postProcessModelProperty} into one vendor extension that {@code pojo.mustache} renders
+ *     verbatim; two separate annotations would not compile ({@code @HalForms} is not {@code
+ *     @Repeatable}). See {@code openspec/changes/add-nullable-hal-input-type-extensions/design.md}
+ *     Decision 1.</li>
+ *     <li><b>{@code x-klabis-nullable}</b> on a property — explicit control of the Java
+ *     {@code JsonNullable<T>} wrapper independent of spec composition; {@link
+ *     #postProcessModelProperty} flips {@code isNullable} so the stock machinery wraps as usual.
+ *     Same design doc, Decision 2.</li>
  * </ul>
  *
  * <p>{@link #fromOperation} additionally re-adds {@value #HAL_FORMS_MEDIA_TYPE} to a HAL response's
@@ -50,6 +62,19 @@ import java.util.Map;
 public class KlabisSpringCodegen extends SpringCodegen {
 
     private static final String HAL_FORMS_MEDIA_TYPE = "application/prs.hal-forms+json";
+
+    private static final String HALFORMS_ACCESS_EXTENSION = "x-klabis-halforms-access";
+    private static final String HAL_INPUT_TYPE_EXTENSION = "x-hal-input-type";
+    private static final String HALFORMS_ANNOTATION_EXTENSION = "x-klabis-halforms-annotation";
+    private static final String KLABIS_NULLABLE_EXTENSION = "x-klabis-nullable";
+    private static final String AUTHORITY_EXTENSION = "x-klabis-authority";
+    private static final String READ_AUTHORITY_EXTENSION = "x-klabis-read-authority";
+    private static final String AUTHORITY_ANNOTATION_EXTENSION = "x-klabis-authority-annotation";
+    private static final String READ_AUTHORITY_ANNOTATION_EXTENSION = "x-klabis-read-authority-annotation";
+    private static final String HAS_AUTHORITY_FQN = "com.klabis.common.users.HasAuthority";
+    private static final String READ_AUTHORITY_FQN = "com.klabis.common.security.fieldsecurity.ReadAuthority";
+    private static final String AUTHORITY_ENUM_FQN = "com.klabis.common.users.Authority";
+    private static final String HAL_FORMS_FQN = "com.klabis.common.ui.HalForms";
 
     /**
      * Set by {@link #fromOperation} before delegating to {@code super}, cleared in a
@@ -90,7 +115,7 @@ public class KlabisSpringCodegen extends SpringCodegen {
      * {@code components.schemas} entry, BEFORE model construction begins.
      *
      * <p>That one-level scan covers every marker in the spec today (all of them sit on the
-     * {@code FamilyGroupResponse}/{@code GroupResponse}/{@code TrainingGroupResponse} payloads). A
+     * {@code LegalGuardianGroupResponse}/{@code GroupResponse}/{@code TrainingGroupResponse} payloads). A
      * marker buried in a nested object, an {@code allOf} member or an array's items would be missed
      * here and silently fall through to {@link #fromProperty}'s no-op path, producing
      * {@code List<Item>} instead of {@code List<EntityModel<Item>>} — recurse here before putting one
@@ -172,7 +197,9 @@ public class KlabisSpringCodegen extends SpringCodegen {
         currentOperation = operation;
         try {
             addDerivedHalFormsContentType(operation);
-            return super.fromOperation(path, httpMethod, operation, servers);
+            CodegenOperation codegenOperation = super.fromOperation(path, httpMethod, operation, servers);
+            renderAuthorityAnnotations(codegenOperation.vendorExtensions);
+            return codegenOperation;
         } finally {
             currentOperation = null;
         }
@@ -339,6 +366,127 @@ public class KlabisSpringCodegen extends SpringCodegen {
      */
     private static String syntheticEntityModelName(String itemName) {
         return "EntityModel" + itemName;
+    }
+
+    /**
+     * Applies the two Klabis property directives on top of the property {@code super} built.
+     *
+     * <p><b>{@code x-klabis-halforms-access} + {@code x-hal-input-type} → the ONE {@code @HalForms}
+     * annotation.</b> Assembled from the two attribute extensions into {@code
+     * vendorExtensions.x-klabis-halforms-annotation} for {@code pojo.mustache} to render verbatim;
+     * with neither present, no extension key is emitted. Assembly lives here and not in the template
+     * because {@code @HalForms} is not {@code @Repeatable}: per-attribute rendering in mustache — or
+     * a hand-written {@code HalForms(formInputType = ...)} stamped through {@code
+     * x-field-extra-annotation} alongside the access-rendered one — puts two {@code @HalForms} on
+     * one component, a compile error. Mustache has no value-aware conditionals for the attribute
+     * matrix either.
+     *
+     * <p><b>{@code x-klabis-nullable} → {@link CodegenProperty#isNullable}.</b> {@code true} lets
+     * the stock {@code openApiNullable} machinery wrap the record component as {@code JsonNullable<T>}
+     * (pojo.mustache adds the single wrapper, so {@code datatypeWithEnum} stays the plain type);
+     * {@code false} forces the plain {@code T} despite a nullable wire type; absent → stock
+     * nullability. The flip runs BEFORE {@code super}: AbstractJavaCodegen collects the
+     * {@code JsonNullable} import and skips set-container deserialization handling from
+     * {@code isNullable} — a flip after {@code super} would produce the wrapper type without the
+     * matching import, while the whole point of the extension is that {@code $ref} +
+     * {@code x-klabis-nullable: true} generates exactly what {@code type: [x, "null"]} generates
+     * today (design Decision 6 zero-diff).
+     *
+     * <p>Placement follows the stock {@code fromProperty} rule this hook reads through: the
+     * property's OWN schema node wins, and a node without extensions falls back to the {@code $ref}
+     * TARGET's extensions. {@code x-klabis-nullable} therefore sits on the PROPERTY beside the
+     * {@code $ref} (iteration 5's ranking shape); a value on a shared $ref target would flow into
+     * every referencing property exactly as it already does for {@code x-field-extra-annotation} —
+     * stock-consistent, not special-cased here. Strictly boolean; anything else is ignored here and
+     * left for {@code validate.mjs} to reject.
+     *
+     * <p>Idempotent by construction: {@code fromModel()} runs this hook over {@code vars} and again
+     * over {@code allVars}, twice per property — the flip rewrites the same boolean and the assembly
+     * recomputes the identical string.
+     */
+    @Override
+    public void postProcessModelProperty(CodegenModel model, CodegenProperty property) {
+        Boolean explicitNullable = explicitNullable(property.getVendorExtensions());
+        if (explicitNullable != null) {
+            property.isNullable = explicitNullable;
+        }
+        super.postProcessModelProperty(model, property);
+        renderAuthorityAnnotations(property.getVendorExtensions());
+        String annotation = halFormsAnnotation(property.getVendorExtensions());
+        if (annotation != null) {
+            property.getVendorExtensions().put(HALFORMS_ANNOTATION_EXTENSION, annotation);
+        }
+    }
+
+    /**
+     * Renders {@code x-klabis-authority} / {@code x-klabis-read-authority} (a single name or a
+     * list, meaning any-of) into the complete {@code @HasAuthority({...})} / {@code
+     * @ReadAuthority({...})} text under {@code x-klabis-authority-annotation} / {@code
+     * x-klabis-read-authority-annotation}, which the templates print verbatim — mustache cannot
+     * tell the last element of a bare string, so joining the list here keeps the templates free of
+     * comma handling. Idempotent, like {@link #halFormsAnnotation}: {@code postProcessModelProperty}
+     * runs twice per property.
+     */
+    static void renderAuthorityAnnotations(Map<String, Object> vendorExtensions) {
+        if (vendorExtensions == null) {
+            return;
+        }
+        putAnnotation(vendorExtensions, AUTHORITY_EXTENSION, AUTHORITY_ANNOTATION_EXTENSION, HAS_AUTHORITY_FQN);
+        putAnnotation(vendorExtensions, READ_AUTHORITY_EXTENSION, READ_AUTHORITY_ANNOTATION_EXTENSION, READ_AUTHORITY_FQN);
+    }
+
+    private static void putAnnotation(Map<String, Object> vendorExtensions, String source, String target, String annotationFqn) {
+        Object value = vendorExtensions.get(source);
+        List<?> names = value instanceof List<?> list ? list : value == null ? List.of() : List.of(value);
+        if (names.isEmpty()) {
+            return;
+        }
+        String authorities = names.stream()
+            .map(name -> AUTHORITY_ENUM_FQN + "." + name)
+            .collect(Collectors.joining(", "));
+        vendorExtensions.put(target, "@" + annotationFqn + "({ " + authorities + " })");
+    }
+
+    /**
+     * The {@code x-klabis-nullable} value of a property's vendor extensions — {@link Boolean#TRUE},
+     * {@link Boolean#FALSE}, or {@code null} when the key is absent or not a boolean. Package-visible
+     * so the unit test drives the same read the hook applies.
+     */
+    static Boolean explicitNullable(Map<String, Object> extensions) {
+        if (extensions == null) {
+            return null;
+        }
+        Object value = extensions.get(KLABIS_NULLABLE_EXTENSION);
+        if (Boolean.TRUE.equals(value)) {
+            return Boolean.TRUE;
+        }
+        return Boolean.FALSE.equals(value) ? Boolean.FALSE : null;
+    }
+
+    /**
+     * The assembled {@code @HalForms(...)} string for a property's vendor extensions, or {@code
+     * null} when neither attribute extension is present. Package-visible so the unit test drives the
+     * same assembly the hook renders. {@code access} precedes {@code formInputType}, and the values
+     * appear exactly as {@code pojo.mustache} used to render the access-only form, so generation
+     * output for existing specs is byte-identical.
+     */
+    static String halFormsAnnotation(Map<String, Object> extensions) {
+        Object access = extensions == null ? null : extensions.get(HALFORMS_ACCESS_EXTENSION);
+        Object inputType = extensions == null ? null : extensions.get(HAL_INPUT_TYPE_EXTENSION);
+        if (access == null && inputType == null) {
+            return null;
+        }
+        StringBuilder annotation = new StringBuilder("@").append(HAL_FORMS_FQN).append('(');
+        if (access != null) {
+            annotation.append("access = ").append(HAL_FORMS_FQN).append(".Access.").append(access);
+        }
+        if (inputType != null) {
+            if (access != null) {
+                annotation.append(", ");
+            }
+            annotation.append("formInputType = \"").append(inputType).append('"');
+        }
+        return annotation.append(')').toString();
     }
 
     /**
